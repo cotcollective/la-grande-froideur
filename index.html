@@ -144,6 +144,7 @@ const AudioSys = {
       case "door": this.tone(180, 0.15, "square", 0.1, 120); this.noise(0.12, 0.08, 500); break;
       case "fireball": this.noise(0.2, 0.1, 600); this.tone(300, 0.15, "sawtooth", 0.07, 150); break;
       case "sludge": this.tone(90, 0.25, "sawtooth", 0.12, 50); this.noise(0.2, 0.07, 250); break;
+      case "flame": this.noise(0.3, 0.09, 900); this.tone(180, 0.25, "sawtooth", 0.05, 80); break;
     }
   },
   // vent ambiant (bruit filtré + LFO)
@@ -169,6 +170,53 @@ const AudioSys = {
       if (this.windGain) { try { this.windGain.gain.value = 0; } catch (e) {} }
     }
   },
+
+  // ---------- MUSIQUE (séquenceur procédural, 3 thèmes) ----------
+  music: { mode: null, timer: null, step: 0, gain: null },
+
+  musicStop() {
+    if (this.music.timer) { clearTimeout(this.music.timer); this.music.timer = null; }
+    this.music.mode = null; this.music.step = 0;
+  },
+
+  // mode: "overworld" | "dungeon" | "boss" | null
+  musicPlay(mode) {
+    if (!this.ctx || this.muted) { this.music.mode = mode; return; } // démarrera au resume
+    if (this.music.mode === mode) return;
+    this.musicStop();
+    if (!mode) return;
+    this.music.mode = mode;
+    this.music.step = 0;
+    this._musicTick();
+  },
+
+  _musicTick() {
+    const M = this.music;
+    if (!M.mode || this.muted) { M.timer = null; return; }
+    const themes = {
+      // valse folk mineur — mémère pis les dimanches (Am / F / C / E)
+      overworld: { bpm: 0.42, bass: [110, 87.3, 130.8, 82.4], lead: [440, 523.3, 659.3, 523.3, 440, 392, 329.6, 440, 523.3, 659.3, 880, 659.3, 523.3, 493.9, 440, 392], wave: "triangle", leadEvery: 2, vol: 0.045 },
+      // pulsation tendue — l'usine pis le dép éteint
+      dungeon:   { bpm: 0.30, bass: [55, 55, 65.4, 49], lead: [220, 0, 261.6, 0, 246.9, 0, 220, 196], wave: "square", leadEvery: 1, vol: 0.035 },
+      // charge — l'Roi
+      boss:      { bpm: 0.24, bass: [82.4, 82.4, 98, 92.5], lead: [329.6, 392, 440, 392, 329.6, 293.7, 261.6, 293.7, 329.6, 392, 440, 523.3, 440, 392, 329.6, 293.7], wave: "sawtooth", leadEvery: 1, vol: 0.05 }
+    };
+    const th = themes[M.mode];
+    if (!th) { M.timer = null; return; }
+    const s = M.step;
+    // basse sur chaque temps
+    const bassF = th.bass[s % th.bass.length];
+    this.tone(bassF / 2, th.bpm * 0.9, "triangle", th.vol * 1.4);
+    // lead entrecroisé
+    if (s % th.leadEvery === 0) {
+      const f = th.lead[(s / th.leadEvery) % th.lead.length];
+      if (f) this.tone(f, th.bpm * 0.75, th.wave, th.vol);
+    }
+    // contretemps noise léger (hi-hat de neige)
+    if (M.mode !== "overworld" && s % 2 === 1) this.noise(0.03, 0.018, 6000);
+    M.step++;
+    M.timer = setTimeout(() => this._musicTick(), th.bpm * 1000);
+  },
   heartbeat() { this.tone(55, 0.1, "sine", 0.2); this.tone(50, 0.12, "sine", 0.16, null, this.ctx.currentTime + 0.18); }
 };
 
@@ -176,7 +224,7 @@ const AudioSys = {
 const SAVE_KEY = "la_grande_froideur_save_v1";
 function defaultState() {
   return {
-    hp: 12, maxHp: 12, keys: 0, frags: 0, dmg: 1, speed: 76,
+    hp: 12, maxHp: 12, keys: 0, frags: 0, dmg: 1, speed: 76, weapon: "poelon",
     map: "overworld", x: 24 * TILE, y: 18 * TILE,
     flags: {}, openedChests: {}, brokenBlocks: {}, takenKeys: {}, unlockedDoors: {},
     stovesLit: {}, deaths: 0, playtime: 0, questThermos: 0,
@@ -219,7 +267,7 @@ function fmtTime(sec) {
 const INTRO_PANELS = [
   {
     img: "intro1",
-    text: "Le 3 juillet. En plein canicule. Le froid est arrivé d'un coup, sans prévenir —\nun froid qui venait pas de la météo, lui. Un froid qui pensait.\nEn quarante-huit heures, tout le Québec était une patinoire avec des poteaux."
+    text: "Le 3 juillet. En plein canicule. Le froid est arrivé d'un coup —\npas un froid de météo, lui. Un froid qui pensait.\nEn deux jours, tout le Québec était une patinoire avec des poteaux."
   },
   {
     img: "intro2",
@@ -231,31 +279,31 @@ const INTRO_PANELS = [
   },
   {
     img: "intro4",
-    text: "Mais ta grand-mère t'a laissé quelque chose avant de s'éteindre avec le poêle :\nsix souvenirs, éparpillés dans le froid comme des braises.\nElle a dit : « La flamme, mon gars, ça s'emprisonne pas. Ça se donne.\nVa pas chercher la flamme de L'Roi. Va chercher c'que t'as déjà. »\nT'as pris ton poêlon. T'as sorti dans le blizzard."
+    text: "Mais ta grand-mère t'a laissé quelque chose avant de s'éteindre avec le poêle :\nsix souvenirs, éparpillés dans le froid comme des braises.\nElle a dit : « La flamme, mon gars, ça s'emprisonne pas. Ça se donne.\nVa pas chercher la flamme de l'Roi. Va chercher c'que t'as déjà. »\nT'as grabbé ton poêlon. Pis t'es sorti dans le blizzard."
   }
 ];
 
 const FRAGS = [
   { id: 0, title: "Le poêle de mémère",
-    text: "« Tu te souviens des dimanches. Tout le monde dans la cuisine, la porte fermée,\nla flamme du poêle qui r'garde tout le monde également. Elle chauffait pas parce\nqu'on la possédait. Elle chauffait parce qu'on était là. Chauffer, c'est donner. »" },
+    text: "« Tu te souviens des dimanches. Tout le monde dans la cuisine, la porte fermée,\nla flamme du poêle qui r'garde tout le monde de même. Elle chauffait pas parce\nqu'on la possédait. Elle chauffait parce qu'on était là. Chauffer, c'est donner. »" },
   { id: 1, title: "La tempête de 98",
-    text: "« Les poteaux étaient tombés, le noir pendant trois semaines. Mais tu te souviens\ndes génératrices qui passaient de maison en maison, des casseroles de chili\ndans les halls d'escalier. On s'est serré les bouteons. Le froid perd toujours\ncette game-là, à long terme. »" },
+    text: "« Les poteaux étaient tombés, le noir pendant trois semaines. Mais tu te souviens\ndes génératrices qui passaient de maison en maison, des casseroles de chili\ndans les halls d'escalier. On s'est serré les coudes. Le froid perd toujours\ncette game-là, à long terme. »" },
   { id: 2, title: "La nuit où t'as fermé le poêle",
-    text: "« Tu te souviens de la première nuit sans mémère. T'as fermé le poêle pour\n« économiser ». T'as dormi en boule avec ton manteau, en pensant que c'était ça,\nêtre solide. C'était ça, être afole. La peur, ça chauffe pas. Ça isole. »" },
+    text: "« Tu te souviens de la première nuit sans mémère. T'as fermé le poêle pour\n« économiser ». T'as dormi en boule avec ton manteau, en pensant que c'était ça,\nêtre solide. C'était ça, avoir peur. La peur, ça chauffe pas. Ça isole. »" },
   { id: 3, title: "L'Roi avant d'être l'Roi",
-    text: "« Tu te souviens de Léo-Paul. Avant, y'ammenait du mazout aux vieux gratuitement,\nl'été, parce que « ça peut pas leur coûter cher, c'est chaud dehors ». Y'était pas\nméchant. Y'avait juste peur. Le jour où y'a mis la flamme en cage, y'a cru\nqu'y protégeait le monde. Y'a juste arrêté de le toucher. »" },
+    text: "« Tu te souviens de Léo-Paul. Avant, y'ammenait du mazout aux vieux gratuitement,\nl'été, pasque « ça peut pas leur coûter cher, c'est chaud dehors ». Y'était pas\nméchant. Y'avait juste peur. Le jour où y'a mis la flamme en cage, y'a cru\nqu'y protégeait le monde. Y'a juste arrêté de le toucher. »" },
   { id: 4, title: "La leçon de la glace",
-    text: "« Tu te souviens de la pêche blanche avec Ghislain. Le poisson, tu peux pas\nl'attraper en serrant. Tu baisses la ligne, tu fais rien, tu attends.\nC'est pareil pour la flamme, pour les gens, pour tout. La chaleur qui serre\nétrangle. La chaleur qui tient laisse de la place. »" },
+    text: "« Tu te souviens de la pêche blanche avec Ghislain. Le poisson, tu peux pas\nl'attraper en serrant. Tu baisses la ligne, tu fais rien, tu attends.\nC'est pareil pour la flamme, pour le monde, pour tout. La chaleur qui serre\nétrangle. La chaleur qui tient laisse de la place. »" },
   { id: 5, title: "L'Équation Fantôme",
-    text: "« Le secret, mon gars. La flamme a jamais été volée. Y'a rien eu à voler.\nElle s'est éteinte parce que plus personne voulait la garder allumée pour\nl'autre. Le froid, c'est pas L'Roi. Le froid, c'est le calcul : chacun qui\ncompte ce que l'autre lui doit. Ta flamme à toé, elle pèse : la chaleur que\ntu donnes, fois le temps que tu restes, divisée par c'que tu gardes pour toé. »" }
+    text: "« Le secret, mon gars. La flamme a jamais été volée. Y'a rien eu à voler.\nElle s'est éteinte pasque plus personne voulait la garder allumée pour\nl'autre. Le froid, c'est pas l'Roi. Le froid, c'est le calcul : chacun qui\ncompte ce que l'autre lui doit. Ta flamme à toé, elle pèse : la chaleur que\ntu donnes, fois le temps que tu restes, divisé par c'que tu gardes pour toé. »" }
 ];
 
 const ENDING_LINES = [
   "La lanterne en cage est tombée. Dedans, y'avait... rien.\nJuste un bec de gaz éteint. Y'avait jamais eu de flamme dedans.",
   "L'Roi est resté assis dans son manteau d'or, à r'garder le bec éteint.\nY'a dit : « J'avais froid, moé aussi. » Personne a ri. C'était vrai.",
-  "Ti-Coq est redescendu au village. Y'a versé le peu d'p'tit lait qu'y'avait\ndans le poêlon commun, pis y'a frotté le métal jusqu'à ce que ça brille.",
+  "Ti-Coq est redescendu au village. Y'a versé le fond d'huile à poêle\nqu'y restait dans le poêlon commun, pis y'a frotté le métal jusqu'à ce que ça brille.",
   "Y'a allumé le poêle de la place. Pas avec une allumette —\navec le feu qu'y'avait gardé allumé pour les autres depuis le début.\nLe village est venu. Sans que personne le demande.",
-  "Le froid, lui, est resté. Y'est toujours là, en dehors des fenêtres givrées.\nMais dedans, ça sent la soupe aux pois. Pis ça, le froid peut pas le prendre.",
+  "Le froid, lui, est resté. Y'est encore là, en dehors des fenêtres givrées.\nMais dedans, ça sent la soupe aux pois. Pis ça, le froid peut pas le prendre.",
   "— LA GRANDE FROIDEUR —\nFin. La flamme était à vous depuis le début."
 ];
 
@@ -264,20 +312,20 @@ const NPCS = [
   { map: "overworld", x: 13, y: 15, name: "La Veuve Fortin",
     lines: [
       "Ti-Coq! T'as l'air d'un homard dans un frigidaire, mon garçon.",
-      "Trente ans que j'habite en haut de la dépanneuse. Le frigo, là-bas... y'gèle de l'intérieur depuis la Grande Froideur. J'entends les porteoli grincer la nuit.",
-      "Si t'y vas... pense au charbon du vieux poêle. Ça s'mange pas, ça s'brûle. Comme les mots de mon défunt. Sauf que ça, ça réchauffe."
+      "Trente ans que j'habite en haut du dépanneur. Le frigo, là-bas... y'gèle de l'intérieur depuis la Grande Froideur. J'entends les portes grincer la nuit, pis y'a pus personne dedans.",
+      "Si t'y vas... pense au charbon du vieux poêle. Ça se mange pas, ça se brûle. Comme les mots de mon défunt, en bas. Sauf que ça, ça réchauffe."
     ] },
   { map: "overworld", x: 9, y: 22, name: "Ghislain Pâquette",
     lines: [
       "La pêche blanche, mon Ti-Coq! Le lac est gelé comme un chèque de pension.",
-      "Le secret : c'est pas le poisson qu'y faut forcer. C'est d'être là, tranquille, avec la bonne miette. Pareil pour la flamme. Pareil pour tout, d'ailleurs.",
-      "Le charbon? J'en mets dans mes bottes. Contre le froid. Ne demande pas."
+      "Le secret : c'est pas le poisson qu'y faut forcer. C'est d'être là, tranquille, avec la bonne miette. Pareil pour la flamme. Pareil pour tout.",
+      "Le charbon? J'en mets dans mes bottes, contre le froid. Demande pas."
     ] },
   { map: "overworld", x: 24, y: 16, name: "Le Gars Plate",
     lines: [
-      "Ch'us plate. Ch'us gelé. La dépanneuse est hantée par un frigo qui pense.",
+      "Ch'us plate. Ch'us gelé. Le dépanneur est hanté par un frigo qui pense.",
       "Un poêlon comme arme! Ouain. C'est mieux qu'un couteau. Ça frappe pis ça fait frire. Multitâche, ça.",
-      "Le charbon du vieux poêle de la place... c'est ça qui t'allumera la route. ramasse-en quand tu peux."
+      "Le charbon du vieux poêle de la place... c'est ça qui t'allumera la route. Ramasse-en quand tu peux."
     ] },
   { map: "overworld", x: 17, y: 25, name: "Docteure Sansregret",
     lines: [
@@ -285,11 +333,11 @@ const NPCS = [
       "Une poutine par cœur, la science est claire là-dessus. Une poutine par cœur.",
       "Le charbon? J'en garde sous ma caisse depuis la fin du monde. C'est... c'est maintenant, là, je pense."
     ] },
-  { map: "overworld", x: 6, y: 13, name: "Le Vieil Onésime",
+  { map: "overworld", x: 6, y: 13, name: "Le Vieux Onésime",
     lines: [
-      "L'Roi du Chauffage... j'l'ai connu quand y'livrait du mazout en vélo.",
-      "Y'a mis la flamme en cage parce qu'y'avait peur qu'elle meure. C'est ça, le trouble avec la peur : elle garde tout pis elle donne rien.",
-      "Prends le charbon de ma cookère, mon garçon. Moé j'ai pus d'souffle pour l'allumer de toute façon."
+      "L'Roi du Chauffage... j'l'ai connu quand y'livrait du mazout à vélo.",
+      "Y'a mis la flamme en cage pasqu'y'avait peur qu'elle meure. C'est ça, le trouble avec la peur : ça garde tout pis ça donne rien.",
+      "Prends le charbon de ma stove, mon garçon. Moé, j'ai pus le souffle pour l'allumer de toute façon."
     ] }
 ];
 
@@ -298,6 +346,7 @@ const SIGNS_TEXT = {
   usine: "USINE #7 — PETROFROID\nInterdit sans bonbonne. Et avec, aussi.",
   chateau: "LA TOUR À LÉO-PAUL — Château d'barils.\n« La chaleur, ça se mérite. » — L.R.G.",
   place: "PLACE DU VILLAGE — Poêle commun.\nS'il est éteint, c'est pas l'Roi l'problème.",
+  stove: "PLACE DU VILLAGE — Poêle commun.\nS'il est éteint, c'est pas l'Roi l'problème.",
   lake: "LAC GELÉ — Pêche blanche.\nLa glace mince craque. Le gros poisson aussi."
 };
 
@@ -648,7 +697,7 @@ function buildDungeon(name) {
     put(6, 10, "p"); put(7, 10, "p"); put(6, 11, "p");
     put(17, 6, "p"); put(18, 6, "p");
     put(20, 5, "k");
-    chests["5,9"] = "dmg_up"; put(5, 9, "C");
+    chests["5,9"] = "bec_gaz"; put(5, 9, "C");
     [[18, 17], [20, 17], [22, 17], [19, 18], [21, 18]].forEach(([x, y]) => put(x, y, ","));
     put(20, 18, "X");
   } else {
@@ -779,7 +828,7 @@ function genOverworldSpawns() {
   }
   for (let i = spots.length - 1; i > 0; i--) { const j = Math.floor(wrnd() * (i + 1)); [spots[i], spots[j]] = [spots[j], spots[i]]; }
   worldSpawns = [];
-  const plan = [{ t: "blob", n: 6 }, { t: "wolf", n: 5 }, { t: "frigo", n: 3 }, { t: "mardeux", n: 4 }];
+  const plan = [{ t: "blob", n: 5 }, { t: "wolf", n: 4 }, { t: "frigo", n: 2 }, { t: "mardeux", n: 3 }];
   let si = 0;
   plan.forEach(({ t, n }) => {
     for (let i = 0; i < n && si < spots.length; i++) {
@@ -822,6 +871,9 @@ function enterMap(name, entryTile) {
   saveGame();
   Entities.reset();
   AudioSys.wind(MAP.outdoor === true);
+  // musique par contexte (boss = quand un boss vit dans la map pis est pas mort)
+  const bossHere = name !== "overworld" && !S.bossDefeated[{ dep: "frigor", usine: "sludger", chateau: "roi" }[name]];
+  AudioSys.musicPlay(bossHere ? "boss" : (name === "overworld" ? "overworld" : "dungeon"));
   Game.exitCd = 0.6;
   camera.x = clamp(S.x - VIEW_W / 2, 0, MAP.w * TILE - VIEW_W);
   camera.y = clamp(S.y - VIEW_H / 2, 0, MAP.h * TILE - VIEW_H);
@@ -939,10 +991,11 @@ const Entities = {
 
     // swing
     if (keyPressed("swing") && p.swingCd <= 0) {
-      p.swingCd = 0.32;
-      this.swing = { t: 0.18, dir: p.dir };
-      AudioSys.sfx("swing");
-      const r = swingRect(p.dir, p.x, p.y, p.w, p.h);
+      const wep = S.weapon === "bec" ? WEAPONS.bec : WEAPONS.poelon;
+      p.swingCd = wep.cd;
+      this.swing = { t: wep.dur, dir: p.dir, kind: S.weapon };
+      AudioSys.sfx(S.weapon === "bec" ? "flame" : "swing");
+      const r = swingRect(p.dir, p.x, p.y, p.w, p.h, S.weapon);
       this._swingRect = r;
       // casse les blocs R / touche les ennemis dans le updateSwing
     }
@@ -1023,13 +1076,20 @@ function spawnParticles(x, y, n, col) {
   }
 }
 
-function swingRect(dir, px, py, pw, ph) {
+// ---------- ARMES ----------
+const WEAPONS = {
+  poelon: { cd: 0.32, dur: 0.18, reach: 20 },                    // rapide, courte portée
+  bec:    { cd: 0.55, dur: 0.30, reach: 44 }                     // Bec de gaz: portée longue, cadence lente
+};
+
+function swingRect(dir, px, py, pw, ph, weapon) {
   const cx = px + pw / 2, cy = py + ph / 2;
-  const R = 20;
-  if (dir === "up") return { x: cx - 14, y: cy - R - 8, w: 28, h: 26 };
-  if (dir === "down") return { x: cx - 14, y: cy + 2, w: 28, h: 26 };
-  if (dir === "left") return { x: cx - R - 8, y: cy - 14, w: 22, h: 28 };
-  return { x: cx + 2, y: cy - 14, w: 22, h: 28 };
+  const R = (weapon === "bec") ? WEAPONS.bec.reach : WEAPONS.poelon.reach;
+  const long = (weapon === "bec");
+  if (dir === "up")    return { x: cx - (long ? 12 : 14), y: cy - R - 8, w: long ? 24 : 28, h: R + 8 };
+  if (dir === "down")  return { x: cx - (long ? 12 : 14), y: cy + 2, w: long ? 24 : 28, h: R + 8 };
+  if (dir === "left")  return { x: cx - R - 8, y: cy - (long ? 12 : 14), w: R + 8, h: long ? 24 : 28 };
+  return { x: cx + 2, y: cy - (long ? 12 : 14), w: R + 8, h: long ? 24 : 28 };
 }
 
 function hurtPlayer(dmg, src, silent) {
@@ -1055,10 +1115,10 @@ function die() {
 
 // ---------- ENNEMIS ----------
 const ENEMY_DEFS = {
-  blob:    { hp: 3, spd: 34, w: 12, h: 10, dmg: 1, col: "#7fd4ff", name: "Glaçon vivant" },
-  wolf:    { hp: 4, spd: 62, w: 14, h: 10, dmg: 1, col: "#9fb3c8", name: "Loup-garrou de janvier" },
-  frigo:   { hp: 7, spd: 20, w: 14, h: 16, dmg: 2, col: "#d7ecff", name: "Frigidaire hanté" },
-  mardeux: { hp: 5, spd: 44, w: 12, h: 12, dmg: 1, col: "#5a6b4a", name: "Mardeux glacé" }
+  blob:    { hp: 3, spd: 30, w: 12, h: 10, dmg: 1, col: "#7fd4ff", name: "Glaçon vivant" },
+  wolf:    { hp: 4, spd: 55, w: 14, h: 10, dmg: 1, col: "#9fb3c8", name: "Loup de janvier" },
+  frigo:   { hp: 7, spd: 18, w: 14, h: 16, dmg: 2, col: "#d7ecff", name: "Frigidaire hanté" },
+  mardeux: { hp: 5, spd: 38, w: 12, h: 12, dmg: 1, col: "#5a6b4a", name: "Mardeux glacé" }
 };
 function makeEnemy(type, x, y) {
   const d = ENEMY_DEFS[type];
@@ -1079,16 +1139,19 @@ function updateEnemy(e, dt, E) {
   const p = E.player;
   const dd = dist(e.x, e.y, p.x, p.y);
   let vx = 0, vy = 0;
-  if (dd < 130) {
-    // chase
+  if (dd < 120) {
+    // chase — marge d'arrêt pour laisser le joueur respirer (pas de perma-charge)
     const ang = Math.atan2(p.y - e.y, p.x - e.x);
-    vx = Math.cos(ang) * d.spd; vy = Math.sin(ang) * d.spd;
-    if (e.type === "wolf") { // zigzag
-      const per = Math.sin(e.t * 6) * 0.5;
-      const ca = ang + per;
-      vx = Math.cos(ca) * d.spd; vy = Math.sin(ca) * d.spd;
+    const stop = (e.type === "frigo") ? 26 : 14; // le frigo s'arrête pour shooter, les autres gardent une case
+    if (dd > stop) {
+      vx = Math.cos(ang) * d.spd; vy = Math.sin(ang) * d.spd;
+      if (e.type === "wolf") { // zigzag
+        const per = Math.sin(e.t * 6) * 0.5;
+        const ca = ang + per;
+        vx = Math.cos(ca) * d.spd; vy = Math.sin(ca) * d.spd;
+      }
     }
-    if (e.type === "frigo" && dd < 60 && e.t % 2 < dt * 2) {
+    if (e.type === "frigo" && dd < 90 && e.t % 2 < dt * 2) {
       E.bullets.push({ x: e.x + 7, y: e.y + 14, vx: Math.cos(ang) * 90, vy: Math.sin(ang) * 90, t: 2, dmg: 1, col: "#bfe8ff", kind: "ice" });
       AudioSys.sfx("fireball");
     }
@@ -1297,7 +1360,7 @@ function tryInteract() {
 }
 
 function stoveInteract() {
-  if (S.stovesLit.place) { Dialog.start(["Le poêle de la place crépite doucement.", "Le village s'est assis autour. Même Plate, pis y'est plate."], "Poêle commun"); return; }
+  if (S.stovesLit.place) { Dialog.start(["Le poêle de la place crépite doucement.", "Le village s'est assis autour. Même Plate, pis y'est moins plate."], "Poêle commun"); return; }
   if (S.frags >= 6) {
     Dialog.start([
       "Tu approches le poêlon. Les six souvenirs chauffent ton poing.",
@@ -1310,7 +1373,7 @@ function stoveInteract() {
     });
   } else {
     Dialog.start([
-      "Le poêle est froid. Y'a pu de charbon, y'a pu de flamme.",
+      "Le poêle est froid. Y'a pus de charbon, y'a pus de flamme.",
       "Mémère disait : « La flamme, ça se donne. » Y'a six souvenirs dehors, dans le froid.",
       "Trouve-les tous (" + S.frags + "/6) pis reviens."
     ], "Poêle commun");
@@ -1329,10 +1392,17 @@ function openChest(fx, fy) {
       S.maxHp += 4; S.hp = S.maxHp;
       AudioSys.sfx("chest");
       Dialog.start(["Une boîte de conserve géante en fonte (???).", "MAX CŒURS! T'en as " + S.maxHp + " à c't'heure."], "Coffre");
+    } else if (item === "bec_gaz") {
+      S.weapon = "bec";
+      AudioSys.sfx("chest"); AudioSys.sfx("jingle");
+      Dialog.start([
+        "Un bec de gaz volé, squeezer dans un manche de poêlon.",
+        "LE BEC DE GAZ — longue portée, mais ça tousse entre les jets. T'es en affaire avec un vrai feu maintenant, mon gars."
+      ], "Coffre");
     } else if (item === "dmg_up") {
       S.dmg += 1;
       AudioSys.sfx("chest");
-      Dialog.start(["Un poêlon en fonte plus lourd. Y'a marqué « LÉO » dessous.", "DÉGÂTS +1. Y'va le sentir passer."], "Coffre");
+      Dialog.start(["Un poêlon en fonte plus lourd, marqué « LÉO » en dessous.", "DÉGÂTS +1. Y'va le sentir passer."], "Coffre");
     }
     saveGame();
     return;
@@ -1345,7 +1415,7 @@ function openChest(fx, fy) {
     // coffre sans fragment: charbon de qualité
     S.keys += 3;
     AudioSys.sfx("chest");
-    Dialog.start(["Du charbon de la cookère à Onésime, gardé au sec.", "+3 charbon."], "Coffre");
+    Dialog.start(["Du charbon de la stove à Onésime, gardé au sec.", "+3 charbon."], "Coffre");
     saveGame();
     return;
   }
@@ -1377,9 +1447,9 @@ function doorInteract(fx, fy) {
   const dd = DUNGEON_DOORS[target];
   if (dd.need && !S.bossDefeated[dd.need]) {
     Dialog.start([
-      dd.label + " — barré par les hommes de L'Roi.",
-      target === "usine" ? "« Pas de flamme pour les curieux. » — L'Roi" : "« La tour, c'est pour le mérite. Toé t'en as pas. »",
-      "Faut d'abord cleaner l'donjon précédent."
+      dd.label + " — barré par les hommes de l'Roi.",
+      target === "usine" ? "« Pas de flamme pour les curieux. » — l'Roi" : "« La tour, c'est pour le mérite. Toé t'en as pas. »",
+      "Faut d'abord cleaner l'donjon d'à côté."
     ], "Affiche");
     return;
   }
@@ -1398,7 +1468,7 @@ function lockedDoorInteract(fx, fy) {
     toast("Porte déverrouillée (-1 charbon)");
     saveGame();
   } else {
-    Dialog.start(["Verrouillé. Les poêles de secours du bâtiment mangent du charbon.", "Y'faut au moins 1 charbon pour l'ouvrir."], "");
+    Dialog.start(["Verrouillé. Les poêles de secours du bâtiment mangent du charbon.", "Y'faut au moins 1 charbon pour l'ouvrir."], "Porte");
   }
 }
 
@@ -1426,16 +1496,16 @@ const Journal = {
 const ALL_NPCS = [
   { id: "fortin", name: "La Veuve Fortin", lines: [
     "Ti-Coq! T'as l'air d'un homard dans un frigidaire, mon garçon.",
-    "Trente ans que j'habite en haut de la dépanneuse. Le frigo, là-bas... y'gèle de l'intérieur depuis la Grande Froideur. J'entends les porteoli grincer la nuit.",
-    "Si t'y vas... pense au charbon du vieux poêle. Ça s'mange pas, ça s'brûle. Comme les mots de mon défunt. Sauf que ça, ça réchauffe."
+    "Trente ans que j'habite en haut du dépanneur. Le frigo, là-bas... y'gèle de l'intérieur depuis la Grande Froideur. J'entends les portes grincer la nuit, pis y'a pus personne dedans.",
+    "Si t'y vas... pense au charbon du vieux poêle. Ça se mange pas, ça se brûle. Comme les mots de mon défunt, en bas. Sauf que ça, ça réchauffe."
   ] },
   { id: "ghislain", name: "Ghislain Pâquette", lines: [
     "La pêche blanche, mon Ti-Coq! Le lac est gelé comme un chèque de pension.",
-    "Le secret : c'est pas le poisson qu'y faut forcer. C'est d'être là, tranquille, avec la bonne miette. Pareil pour la flamme. Pareil pour tout, d'ailleurs.",
-    "Le charbon? J'en mets dans mes bottes. Contre le froid. Ne demande pas."
+    "Le secret : c'est pas le poisson qu'y faut forcer. C'est d'être là, tranquille, avec la bonne miette. Pareil pour la flamme. Pareil pour tout.",
+    "Le charbon? J'en mets dans mes bottes, contre le froid. Demande pas."
   ] },
   { id: "plate", name: "Le Gars Plate", lines: [
-    "Ch'us plate. Ch'us gelé. La dépanneuse est hantée par un frigo qui pense.",
+    "Ch'us plate. Ch'us gelé. Le dépanneur est hanté par un frigo qui pense.",
     "Un poêlon comme arme! Ouain. C'est mieux qu'un couteau. Ça frappe pis ça fait frire. Multitâche, ça.",
     "Le charbon du vieux poêle de la place... c'est ça qui t'allumera la route. Ramasse-en quand tu peux."
   ] },
@@ -1444,10 +1514,10 @@ const ALL_NPCS = [
     "Une poutine par cœur, la science est claire là-dessus. Une poutine par cœur.",
     "Le charbon? J'en garde sous ma caisse depuis la fin du monde. C'est... c'est maintenant, là, je pense."
   ] },
-  { id: "onesime", name: "Le Vieil Onésime", lines: [
-    "L'Roi du Chauffage... j'l'ai connu quand y'livrait du mazout en vélo.",
-    "Y'a mis la flamme en cage parce qu'y'avait peur qu'elle meure. C'est ça, le trouble avec la peur : elle garde tout pis elle donne rien.",
-    "Prends le charbon de ma cookère, mon garçon. Moé j'ai pus d'souffle pour l'allumer de toute façon."
+  { id: "onesime", name: "Le Vieux Onésime", lines: [
+    "L'Roi du Chauffage... j'l'ai connu quand y'livrait du mazout à vélo.",
+    "Y'a mis la flamme en cage pasqu'y'avait peur qu'elle meure. C'est ça, le trouble avec la peur : ça garde tout pis ça donne rien.",
+    "Prends le charbon de ma stove, mon garçon. Moé, j'ai pus le souffle pour l'allumer de toute façon."
   ] }
 ];
 
@@ -1801,7 +1871,33 @@ function drawSwing(ctx, s) {
   const p = Entities.player;
   const r = Entities._swingRect;
   if (!r) return;
-  const prog = 1 - (s.t / 0.18);
+  if (s.kind === "bec") {
+    // Bec de gaz: jet de flamme conique qui lèche loin devant
+    const prog = 1 - (s.t / WEAPONS.bec.dur);
+    const base = { up: -Math.PI / 2, down: Math.PI / 2, left: Math.PI, right: 0 }[p.dir];
+    ctx.save();
+    ctx.translate(p.x + p.w / 2, p.y + p.h / 2);
+    ctx.rotate(base + Math.PI / 2);
+    const L = WEAPONS.bec.reach + 8;
+    const flick = Math.sin(prog * 22) * 2;
+    const g2 = ctx.createLinearGradient(0, -4, 0, -L);
+    g2.addColorStop(0, "rgba(255,240,200,0.95)");
+    g2.addColorStop(0.4, "rgba(255,160,60,0.75)");
+    g2.addColorStop(1, "rgba(255,80,30,0)");
+    ctx.fillStyle = g2;
+    ctx.beginPath();
+    ctx.moveTo(-3, -4);
+    ctx.quadraticCurveTo(-(7 + flick), -L * 0.55, 0, -L - flick);
+    ctx.quadraticCurveTo(7 + flick, -L * 0.55, 3, -4);
+    ctx.closePath();
+    ctx.fill();
+    // le bec lui-même
+    ctx.fillStyle = "#2a2d33";
+    ctx.fillRect(-2, -10, 4, 7);
+    ctx.restore();
+    return;
+  }
+  const prog = 1 - (s.t / WEAPONS.poelon.dur);
   ctx.save();
   ctx.translate(p.x + p.w / 2, p.y + p.h / 2);
   const base = { up: -Math.PI / 2, down: Math.PI / 2, left: Math.PI, right: 0 }[p.dir];
@@ -2036,7 +2132,7 @@ function drawGameOver(ctx) {
   ctx.fillText("T'AS GELÉ SUR PLACE", VIEW_W / 2, 96);
   ctx.fillStyle = "#e8eef4"; ctx.font = "8px monospace";
   ctx.fillText("Le froid r'garde qui vacille.", VIEW_W / 2, 116);
-  ctx.fillText("Morts: " + S.deaths + " — Souvenirs: " + S.frags + "/6", VIEW_W / 2, 128);
+  ctx.fillText("Morts : " + S.deaths + " — Souvenirs : " + S.frags + "/6", VIEW_W / 2, 128);
   ctx.fillStyle = "#ffb36b";
   ctx.fillText("[ENTRÉE] Repartir du village", VIEW_W / 2, 152);
   ctx.textAlign = "left";
@@ -2235,7 +2331,11 @@ const Game = {
         Entities.update(dt);
         checkExits();
         if (keyPressed("journal")) Journal.toggle();
-        if (keyPressed("mute")) AudioSys.setMuted(!AudioSys.muted);
+        if (keyPressed("mute")) {
+          AudioSys.setMuted(!AudioSys.muted);
+          AudioSys.musicPlay(AudioSys.muted ? null : (S.map === "overworld" ? "overworld" : (Entities.boss ? "boss" : "dungeon")));
+          toast(AudioSys.muted ? "Son coupé" : "Son allumé");
+        }
         // boss mort → dialogue + fragment
         if (this.bossJustDied) {
           const kind = this.bossJustDied; this.bossJustDied = null;
