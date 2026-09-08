@@ -594,15 +594,14 @@ function genOverworld() {
   grid[19][54] = "C";
   chestRegistry["54,19"] = 4;
 
-  // ---- 4b) EASTER EGG: le Bloc-Mémoire (slideshow tempête de verglas 98) ----
-  // petit îlot de glace craquée au nord-est du lac, un bloc R scellé devant un monolithe M
-  // (l'espace reste vide/invisible: le M ne se révèle qu'une fois le bloc cassé, avec tadam)
-  grid[10][56] = "x"; grid[10][57] = "x"; grid[10][58] = "x";
-  grid[11][56] = "x"; grid[11][57] = "M"; grid[11][58] = "x";
-  grid[12][56] = "R"; grid[12][57] = "x"; grid[12][58] = "x";
-  // voie d'eau qui connecte l'îlot au lac (depuis le bord du lac à (54,15))
-  for (const [wx, wy] of [[55, 15], [55, 14], [55, 13], [55, 12], [55, 11]]) grid[wy][wx] = "~";
-  grid[12][55] = "~";  // accès ouest de l'îlot, face au bloc R
+  // ---- 4b) EASTER EGG: le Cercle de Neige (nord-ouest du lac) ----
+  // une formation circulaire de neige "évidée" — naturel, personne la remarque.
+  // En son centre: un bloc R (glace scellée) posé sur une dalle M (le Bloc-Mémoire).
+  // Casser le bloc R = TADAM = téléportation dans la salle secrète (mini-donjon slideshow).
+  // (55,14)/(55,15) : le bloc R pis sa dalle — sur la rive NE du lac, marchables depuis le lac gelé.
+  carveCircle(grid, 55, 13, 2, ",");          // le cercle de neige (même tuile que les rives usine/château)
+  grid[13][55] = "M";                          // la dalle-mémoire (au centre nord du cercle)
+  grid[14][55] = "R";                          // le scell de glace, côté sud (le joueur arrive du lac)
 
   // charbon + poutines (tuiles ramassables "c"/"q" sur cellules marchables)
   CHARBON_SPOTS.forEach(s => { const [cx, cy] = nearestWalkable(grid, s.x, s.y); grid[cy][cx] = "c"; });
@@ -755,6 +754,17 @@ function buildDungeon(name) {
     chests["5,9"] = "bec_gaz"; put(5, 9, "C");
     [[18, 17], [20, 17], [22, 17], [19, 18], [21, 18]].forEach(([x, y]) => put(x, y, ","));
     put(20, 18, "X");
+  } else if (name === "secret") {
+    // LA SALLE DES SOUVENIRS — sous le Cercle de Neige. Petite, calme, en glace bleue.
+    // Une salle ovale, le poêle de mémère sculpté dans la glace (M), pas d'ennemis, pas de combat.
+    for (let y = 7; y <= 13; y++) for (let x = 8; x <= 17; x++) {
+      const dx = (x - 12.5) / 5.2, dy = (y - 10) / 3.4;
+      if (dx * dx + dy * dy < 1) put(x, y, ".");
+    }
+    put(12, 13, F); put(12, 14, F);              // couloir d'entrée (sud)
+    put(12, 6, "M");                              // le poêle de mémère en glace (au nord)
+    put(11, 9, "q"); put(14, 11, "q");            // deux poutines offertes (le seul trésor)
+    put(8, 12, "E");                              // sortie
   } else {
     room(10, 15, 14, 17); room(5, 8, 15, 12); room(17, 8, 22, 12); room(16, 15, 23, 19);
     put(12, 13, F); put(12, 14, F);
@@ -767,15 +777,16 @@ function buildDungeon(name) {
     put(19, 17, "X");
   }
   put(12, 17, "E");
-  return { name, grid, w: W, h: H, outdoor: false, theme: name, chests, chestRegistry: {}, signRegistry: {} };
+  return { name, grid, w: W, h: H, outdoor: false, theme: name === "secret" ? "dep" : name, chests, chestRegistry: {}, signRegistry: {} };
 }
 
 const dungeonSpawns = {
   dep: [{ type: "blob", x: 6 * TILE, y: 10 * TILE }, { type: "blob", x: 14 * TILE, y: 11 * TILE }, { type: "frigo", x: 19 * TILE, y: 7 * TILE }],
   usine: [{ type: "mardeux", x: 6 * TILE, y: 9 * TILE }, { type: "mardeux", x: 17 * TILE, y: 6 * TILE }, { type: "blob", x: 19 * TILE, y: 13 * TILE }],
-  chateau: [{ type: "mardeux", x: 8 * TILE, y: 10 * TILE }, { type: "wolf", x: 18 * TILE, y: 9 * TILE }, { type: "frigo", x: 20 * TILE, y: 11 * TILE }]
+  chateau: [{ type: "mardeux", x: 8 * TILE, y: 10 * TILE }, { type: "wolf", x: 18 * TILE, y: 9 * TILE }, { type: "frigo", x: 20 * TILE, y: 11 * TILE }],
+  secret: []  // sanctuaire: aucun ennemi, juste le calme pis le slideshow
 };
-const dungeonEntry = { dep: [12, 16], usine: [12, 16], chateau: [12, 16] };
+const dungeonEntry = { dep: [12, 16], usine: [12, 16], chateau: [12, 16], secret: [12, 14] };
 
 // ---------- validation BFS ----------
 function bfsReachable(grid, w, h, sx, sy, walkFn) {
@@ -829,6 +840,7 @@ function validateOverworld() {
 }
 
 function validateDungeon(name) {
+  if (name === "secret") { console.log("[secret] sanctuaire: pas de validation combat requise"); return true; }
   const d = buildDungeon(name);
   const F = { dep: ".", usine: ",", chateau: "," }[name];
   // phase 1: clé atteignable en cassant R et B (le poêlon casse les deux, d reste solide)
@@ -1102,10 +1114,12 @@ const Entities = {
         S.brokenBlocks[S.map + ":" + tx + ":" + ty] = 1;
         AudioSys.sfx(ch === "R" ? "shatter" : "clang");
         spawnParticles(tx * TILE + 8, ty * TILE + 8, 6, ch === "R" ? "#bfe9ff" : "#8a6f4d");
-        // easter egg: casser le bloc R du Bloc-Mémoire révèle le monolithe pis fait le tadam
-        if (ch === "R" && S.map === "overworld" && g(tx + 1, ty) === "M") {
+        // easter egg: casser le scell de glace du Cercle de Neige = TADAM pis téléport dans la salle secrète
+        if (ch === "R" && S.map === "overworld" && g(tx, ty - 1) === "M") {
           AudioSys.sfx("tadam");
-          toast("...un monolithe s'est réveillé dans la glace.");
+          Game.pendingSecret = true;
+          Game.setState("confirmdoor");
+          toast("...la glace crie pis une dalle se dévoile sous tes pieds.");
         }
       }
     }
@@ -1427,8 +1441,8 @@ function tryInteract() {
   // porte de donjon
   if (ch === "D") { doorInteract(fx, fy); return; }
 
-  // easter egg: le Bloc-Mémoire (tempête de verglas 98)
-  if (ch === "M" && S.map === "overworld") {
+  // easter egg: le poêle de mémère en glace (dans la Salle des Souvenirs) — le slideshow
+  if (ch === "M" && S.map === "secret") {
     Game.stormIdx = 0;
     Game.setState("storm");
     AudioSys.sfx("tadam");
@@ -1560,6 +1574,12 @@ function checkExits() {
   const p = Entities.player;
   const tx = Math.floor((p.x + p.w / 2) / TILE), ty = Math.floor((p.y + p.h / 2) / TILE);
   if (g(tx, ty) === "E") {
+    if (S.map === "secret") {
+      // sortie du sanctuaire: remonte dans le Cercle de Neige, devant la dalle
+      AudioSys.sfx("door");
+      enterMap("overworld", { x: 55, y: 14 });
+      return;
+    }
     const door = DUNGEON_DOORS[S.map];
     AudioSys.sfx("door");
     enterMap("overworld", { x: door.x, y: door.y + 1 });
@@ -2433,7 +2453,11 @@ function drawConfirmDoor(ctx) {
   }
   ctx.textAlign = "center";
   ctx.fillStyle = "#e8eef4"; ctx.font = "8px monospace";
-  ctx.fillText("Entrer dans " + (dd ? dd.label : "??") + " ?", VIEW_W / 2, VIEW_H - 30);
+  if (Game.pendingSecret) {
+    ctx.fillText("Une dalle se dévoile sous la glace. Descendre ?", VIEW_W / 2, VIEW_H - 30);
+  } else {
+    ctx.fillText("Entrer dans " + (dd ? dd.label : "??") + " ?", VIEW_W / 2, VIEW_H - 30);
+  }
   ctx.fillStyle = "#7fd4ff"; ctx.font = "7px monospace";
   ctx.fillText("[ENTRÉE] Oui    [ÉCHAP] Non", VIEW_W / 2, VIEW_H - 14);
   ctx.textAlign = "left";
@@ -2564,10 +2588,16 @@ const Game = {
         if (keyPressed("interact")) {
           const target = this.pendingDungeon;
           this.pendingDungeon = null;
-          if (target) { enterMap(target); AudioSys.sfx("door"); }
+          if (Game.pendingSecret) {
+            // la dalle secrète: téléport dans la Salle des Souvenirs
+            Game.pendingSecret = false;
+            enterMap("secret");
+            AudioSys.sfx("tadam");
+            AudioSys.musicPlay("dungeon");
+          } else if (target) { enterMap(target); AudioSys.sfx("door"); }
           this.setState("play");
         }
-        if (keyPressed("pause")) { this.pendingDungeon = null; this.setState("play"); }
+        if (keyPressed("pause")) { this.pendingDungeon = null; Game.pendingSecret = false; this.setState("play"); }
         break;
 
       case "gameover":
