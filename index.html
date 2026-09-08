@@ -16,19 +16,46 @@
 <meta name="twitter:description" content="Zelda-like 2D post-apo québécois en joual. Gratuit, direct dans le browser.">
 <meta name="twitter:image" content="https://cotcollective.github.io/la-grande-froideur/assets/title.png">
 <link rel="canonical" href="https://cotcollective.github.io/la-grande-froideur/">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <style>
-  html, body { margin: 0; padding: 0; background: #05070b; height: 100%; overflow: hidden; }
-  body { display: flex; align-items: center; justify-content: center; flex-direction: column; }
+  html, body { margin: 0; padding: 0; background: #05070b; height: 100%; overflow: hidden; position: fixed; width: 100%; }
+  body { display: flex; align-items: center; justify-content: center; flex-direction: column; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
   #game { image-rendering: pixelated; image-rendering: crisp-edges;
     box-shadow: 0 0 60px rgba(80,140,200,0.25), 0 0 120px rgba(20,40,80,0.5);
     border: 2px solid #1a2634; border-radius: 4px; }
   #help { color: #4a5a6e; font-family: monospace; font-size: 12px; margin-top: 10px; user-select: none; }
   #help b { color: #7fd4ff; }
+  /* ---- contrôles tactiles (mobile) — visibles seulement sur écran tactile ---- */
+  #touchui { display: none; position: fixed; inset: 0; pointer-events: none; z-index: 10; }
+  @media (pointer: coarse) { #touchui { display: block; } }
+  #stick { position: absolute; left: 18px; bottom: 18px; width: 132px; height: 132px; border-radius: 50%;
+    background: rgba(20,34,52,0.35); border: 2px solid rgba(127,212,255,0.35); pointer-events: auto; touch-action: none; }
+  #nub { position: absolute; left: 44px; top: 44px; width: 44px; height: 44px; border-radius: 50%;
+    background: rgba(127,212,255,0.45); border: 2px solid rgba(200,235,255,0.7); }
+  .tbtn { position: absolute; border-radius: 50%; pointer-events: auto; touch-action: none;
+    background: rgba(20,34,52,0.4); border: 2px solid rgba(127,212,255,0.45); color: #cfe8ff;
+    font-family: monospace; font-weight: bold; display: flex; align-items: center; justify-content: center; }
+  .tbtn:active, .tbtn.on { background: rgba(127,212,255,0.5); }
+  #btnA { right: 20px; bottom: 88px; width: 84px; height: 84px; font-size: 15px; }   /* poêlon */
+  #btnB { right: 112px; bottom: 20px; width: 64px; height: 64px; font-size: 13px; }  /* action */
+  #btnI { right: 20px; bottom: 20px; width: 52px; height: 52px; font-size: 16px; }   /* journal */
 </style>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#05070b">
 </head>
 <body>
 <canvas id="game" width="960" height="720"></canvas>
 <div id="help"><b>WASD/ZQSD/Flèches</b> bouger · <b>ESPACE/J</b> poêlon · <b>E/Entrée</b> parler/action · <b>I</b> journal · <b>M</b> son</div>
+<div id="touchui">
+  <div id="stick"><div id="nub"></div></div>
+  <div class="tbtn" id="btnA">POÈLE</div>
+  <div class="tbtn" id="btnB">E</div>
+  <div class="tbtn" id="btnI">I</div>
+</div>
 <script>
 /* ==== 01_core.js ==== */
 "use strict";
@@ -39,7 +66,20 @@
    ============================================================ */
 
 // ---------- CONSTANTES ----------
-const TILE = 16, VIEW_W = 320, VIEW_H = 240, SCALE = 3;
+const TILE = 16, VIEW_W = 320, VIEW_H = 240;
+// SCALE dynamique: entier ≤ écran (mobile-friendly), défaut 3 desktop
+let SCALE = 3;
+function fitScale() {
+  const availW = window.innerWidth - 8, availH = window.innerHeight - 40;
+  const s = Math.min(availW / VIEW_W, availH / VIEW_H);
+  SCALE = Math.max(2, Math.min(4, Math.floor(s) || 2));
+  const c = document.getElementById("game");
+  if (c) {
+    c.width = VIEW_W * SCALE; c.height = VIEW_H * SCALE;
+    c.style.width = (VIEW_W * SCALE) + "px"; c.style.height = (VIEW_H * SCALE) + "px";
+    if (Renderer.ctx) { Renderer.ctx.imageSmoothingEnabled = false; }
+  }
+}
 const FPS_CAP = 60;
 const SOLID = new Set(["#", "T", "H", "W", "o", "L", "B", "S", "R"]);
 const INTERACT = new Set(["^", "C", "V"]);
@@ -73,6 +113,72 @@ window.addEventListener("keydown", e => {
 });
 window.addEventListener("keyup", e => { keys[e.key] = false; });
 function clearPressed() { for (const k in pressed) delete pressed[k]; }
+
+// ---------- CONTRÔLES TACTILES (mobile) ----------
+// Le joystick pis les boutons injectent directement dans keys/pressed —
+// la logique de jeu voit exactement les mêmes signaux que le clavier.
+// IMPORTANT: pas de re-press par frame — un tap = UN edge. Le poêlon tenu
+// marche via keys[] (auto-repeat du swing géré par le cooldown).
+function initTouch() {
+  const stick = document.getElementById("stick");
+  const nub = document.getElementById("nub");
+  const btnA = document.getElementById("btnA");
+  const btnB = document.getElementById("btnB");
+  const btnI = document.getElementById("btnI");
+  if (!stick) return;
+  let stickId = null;
+
+  const KEY = { left: "ArrowLeft", right: "ArrowRight", up: "ArrowUp", down: "ArrowDown" };
+
+  function stickMove(t) {
+    const r = stick.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    let dx = t.clientX - cx, dy = t.clientY - cy;
+    const max = r.width / 2 - 10;
+    const d = Math.hypot(dx, dy);
+    if (d > max) { dx = dx / d * max; dy = dy / d * max; }
+    nub.style.left = (44 + dx) + "px"; nub.style.top = (44 + dy) + "px";
+    // dead zone 20% — pas de drift au repos
+    const nx = dx / max, ny = dy / max;
+    keys[KEY.left] = nx < -0.2; keys[KEY.right] = nx > 0.2;
+    keys[KEY.up] = ny < -0.2; keys[KEY.down] = ny > 0.2;
+  }
+  function stickEnd() {
+    stickId = null;
+    nub.style.left = "44px"; nub.style.top = "44px";
+    keys[KEY.left] = keys[KEY.right] = keys[KEY.up] = keys[KEY.down] = false;
+  }
+  stick.addEventListener("touchstart", e => {
+    e.preventDefault();
+    const t = e.changedTouches[0];
+    stickId = t.identifier; stickMove(t);
+    AudioSys.init(); AudioSys.resume();
+  }, { passive: false });
+  stick.addEventListener("touchmove", e => {
+    e.preventDefault();
+    for (const t of e.changedTouches) if (t.identifier === stickId) stickMove(t);
+  }, { passive: false });
+  stick.addEventListener("touchend", e => {
+    for (const t of e.changedTouches) if (t.identifier === stickId) stickEnd();
+  });
+  stick.addEventListener("touchcancel", stickEnd);
+
+  function bindBtn(el, key) {
+    el.addEventListener("touchstart", e => {
+      e.preventDefault();
+      keys[key] = true; pressed[key] = true;
+      el.classList.add("on");
+      AudioSys.init(); AudioSys.resume();
+    }, { passive: false });
+    const off = e => { e.preventDefault(); keys[key] = false; el.classList.remove("on"); };
+    el.addEventListener("touchend", off, { passive: false });
+    el.addEventListener("touchcancel", off, { passive: false });
+  }
+  bindBtn(btnA, " ");   // poêlon
+  bindBtn(btnB, "e");   // action/parler/confirmer
+  bindBtn(btnI, "i");   // journal
+}
+window.addEventListener("resize", fitScale);
 
 // ---------- AUDIO (WebAudio procédural, zéro asset) ----------
 const AudioSys = {
@@ -1635,7 +1741,7 @@ const Renderer = {
 
   init() {
     this.canvas = document.getElementById("game");
-    this.canvas.width = VIEW_W * SCALE; this.canvas.height = VIEW_H * SCALE;
+    // fitScale() a déjà dimensionné le canvas pour l'écran courant
     this.ctx = this.canvas.getContext("2d");
     this.ctx.imageSmoothingEnabled = false;
     this.buildAtlas();
@@ -2659,12 +2765,19 @@ function loop(t) {
 
 // ---------- BOOT ----------
 function boot() {
+  fitScale();
   Renderer.init();
+  initTouch();
   // si un save existe: pas d'enterMap encore — se fait dans startNewOrContinue
   window.addEventListener("keydown", () => { AudioSys.init(); AudioSys.resume(); }, { once: true });
+  window.addEventListener("touchstart", () => { AudioSys.init(); AudioSys.resume(); }, { once: true, passive: true });
   requestAnimationFrame(ts => { Game.lastT = ts; requestAnimationFrame(loop); });
 }
 window.addEventListener("DOMContentLoaded", boot);
+// PWA: service worker (cache offline) — seulement en https (pas file://, pas les tests)
+if ("serviceWorker" in navigator && location.protocol === "https:") {
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+}
 
 // garde pour tests headless
 if (typeof module !== "undefined" && module.exports) { module.exports = { Game, Entities, S: () => S }; }
