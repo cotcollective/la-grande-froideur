@@ -579,9 +579,10 @@ function genOverworld() {
   DUNGEON_DOORS.dep.x = dep.door[0]; DUNGEON_DOORS.dep.y = dep.door[1];
   DUNGEON_DOORS.usine.x = usine.door[0]; DUNGEON_DOORS.usine.y = usine.door[1];
   DUNGEON_DOORS.chateau.x = chateau.door[0]; DUNGEON_DOORS.chateau.y = chateau.door[1];
-  placeSign(DUNGEON_DOORS.dep.x - 2, DUNGEON_DOORS.dep.y, SIGNS_TEXT.dep);
-  placeSign(DUNGEON_DOORS.usine.x - 2, DUNGEON_DOORS.usine.y, SIGNS_TEXT.usine);
-  placeSign(DUNGEON_DOORS.chateau.x - 2, DUNGEON_DOORS.chateau.y, SIGNS_TEXT.chateau);
+  // affiches JAMAIS sur la tuile d'approche de la porte (le "^" est solide = porte injoignable)
+  placeSign(DUNGEON_DOORS.dep.x - 2, DUNGEON_DOORS.dep.y + 2, SIGNS_TEXT.dep);
+  placeSign(DUNGEON_DOORS.usine.x + 2, DUNGEON_DOORS.usine.y + 2, SIGNS_TEXT.usine);
+  placeSign(DUNGEON_DOORS.chateau.x - 3, DUNGEON_DOORS.chateau.y + 2, SIGNS_TEXT.chateau);
   placeSign(18, 12, SIGNS_TEXT.place);
   placeSign(46, 21, SIGNS_TEXT.lake);
 
@@ -751,19 +752,31 @@ function validateOverworld() {
   const reach = bfsReachable(grid, w, h, POI.spawn[0], POI.spawn[1],
     ch => WALK.has(ch) || ["C", "c", "q", "^", "S", "D"].includes(ch));
   let fail = 0;
-  const near = (x, y) => reach.has(x + "," + y) || [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]].some(([dx, dy]) => reach.has((x + dx) + "," + (y + dy)));
+  // La tuile D'APPROCHE de la porte doit être marchable pis reachée:
+  // le joueur interagit avec D via facingTile — y faut une tuile solide-adjacente LIBRE devant la D.
+  const approach = (x, y) => {
+    for (const [dx, dy] of [[0, 1], [1, 0], [-1, 0], [0, -1]]) {
+      const ch = (grid[y + dy] || [])[x + dx];
+      if (ch === "." || ch === ",") return reach.has((x + dx) + "," + (y + dy));
+    }
+    return false;
+  };
   const checks = [
-    ["porte dep", DUNGEON_DOORS.dep.x, DUNGEON_DOORS.dep.y],
-    ["porte usine", DUNGEON_DOORS.usine.x, DUNGEON_DOORS.usine.y],
-    ["porte chateau", DUNGEON_DOORS.chateau.x, DUNGEON_DOORS.chateau.y],
-    ["poele", 18, 13],
-    ["npc fortin", ...MAP.npcPos.fortin], ["npc ghislain", ...MAP.npcPos.ghislain],
+    ["porte dep", DUNGEON_DOORS.dep.x, DUNGEON_DOORS.dep.y, true],
+    ["porte usine", DUNGEON_DOORS.usine.x, DUNGEON_DOORS.usine.y, true],
+    ["porte chateau", DUNGEON_DOORS.chateau.x, DUNGEON_DOORS.chateau.y, true],
+    ["poele", 18, 13, false],
+    ["npc fortin", ...MAP.npcPos.fortin, false], ["npc ghislain", ...MAP.npcPos.ghislain],
     ["npc plate", ...MAP.npcPos.plate], ["npc sansregret", ...MAP.npcPos.sansregret],
     ["npc onesime", ...MAP.npcPos.onesime]
   ];
-  Object.keys(MAP.chestRegistry).forEach(k => checks.push(["coffre " + k, ...k.split(",").map(Number)]));
-  Object.keys(MAP.signRegistry).forEach(k => checks.push(["affiche " + k, ...k.split(",").map(Number)]));
-  checks.forEach(([nm, x, y]) => { if (!near(x, y)) { console.error("[WORLD] UNREACHABLE:", nm, x, y); fail++; } });
+  Object.keys(MAP.chestRegistry).forEach(k => checks.push(["coffre " + k, ...k.split(",").map(Number), false]));
+  Object.keys(MAP.signRegistry).forEach(k => checks.push(["affiche " + k, ...k.split(",").map(Number), false]));
+  checks.forEach(([nm, x, y, isDoor]) => {
+    if (isDoor) {
+      if (!approach(x, y)) { console.error("[WORLD] PORTE BLOQUÉE (pas de tuile d'approche reachée):", nm, x, y); fail++; }
+    } else if (!reach.has(x + "," + y)) { console.error("[WORLD] UNREACHABLE:", nm, x, y); fail++; }
+  });
   console.log("[WORLD] overworld reachability:", fail === 0 ? "OK" : fail + " FAILS", "(" + reach.size + " cellules)");
   return fail === 0;
 }
@@ -2197,7 +2210,7 @@ function drawJournal(ctx) {
   ctx.fillStyle = "#e8eef4"; ctx.font = "8px monospace";
   ctx.fillText("Souvenirs de mémère : " + S.frags + "/6", 20, 46);
   ctx.fillText("Charbon : " + S.keys + "   |   Temps : " + fmtTime(S.playtime), 20, 58);
-  ctx.fillText("Morts : " + S.deaths + "   |   Donjons cleanés : " + Object.keys(S.bossDefeated).length + "/3", 20, 70);
+  ctx.fillText("Morts : " + S.deaths + "   |   Donjons cleanés : " + ["frigor", "sludger", "roi"].filter(k => S.bossDefeated[k]).length + "/3", 20, 70);
   let yy = 90;
   ctx.font = "8px monospace";
   for (let i = 0; i < 6; i++) {
