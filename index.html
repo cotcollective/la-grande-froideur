@@ -195,25 +195,32 @@ const AudioSys = {
     if (!M.mode || this.muted) { M.timer = null; return; }
     const themes = {
       // valse folk mineur — mémère pis les dimanches (Am / F / C / E)
-      overworld: { bpm: 0.42, bass: [110, 87.3, 130.8, 82.4], lead: [440, 523.3, 659.3, 523.3, 440, 392, 329.6, 440, 523.3, 659.3, 880, 659.3, 523.3, 493.9, 440, 392], wave: "triangle", leadEvery: 2, vol: 0.045 },
+      overworld: { bpm: 0.42, bass: [110, 87.3, 130.8, 82.4], lead: [440, 523.3, 659.3, 523.3, 440, 392, 329.6, 440, 523.3, 659.3, 880, 659.3, 523.3, 493.9, 440, 392], wave: "triangle", leadEvery: 2, vol: 0.075 },
       // pulsation tendue — l'usine pis le dép éteint
-      dungeon:   { bpm: 0.30, bass: [55, 55, 65.4, 49], lead: [220, 0, 261.6, 0, 246.9, 0, 220, 196], wave: "square", leadEvery: 1, vol: 0.035 },
-      // charge — l'Roi
-      boss:      { bpm: 0.24, bass: [82.4, 82.4, 98, 92.5], lead: [329.6, 392, 440, 392, 329.6, 293.7, 261.6, 293.7, 329.6, 392, 440, 523.3, 440, 392, 329.6, 293.7], wave: "sawtooth", leadEvery: 1, vol: 0.05 }
+      dungeon:   { bpm: 0.30, bass: [55, 55, 65.4, 49], lead: [220, 0, 261.6, 0, 246.9, 0, 220, 196], wave: "square", leadEvery: 1, vol: 0.055 },
+      // charge — le Roi
+      boss:      { bpm: 0.24, bass: [82.4, 82.4, 98, 92.5], lead: [329.6, 392, 440, 392, 329.6, 293.7, 261.6, 293.7, 329.6, 392, 440, 523.3, 440, 392, 329.6, 293.7], wave: "sawtooth", leadEvery: 1, vol: 0.08 }
     };
     const th = themes[M.mode];
     if (!th) { M.timer = null; return; }
     const s = M.step;
-    // basse sur chaque temps
+    const t0 = this.ctx.currentTime;
+    // basse sur chaque temps (plus longue pis pleine)
     const bassF = th.bass[s % th.bass.length];
-    this.tone(bassF / 2, th.bpm * 0.9, "triangle", th.vol * 1.4);
+    this.tone(bassF / 2, th.bpm * 1.15, "triangle", th.vol * 2.2);
+    // pédale d'accord (une quinte au-dessus de la basse, tenue — remplit le milieu)
+    this.tone(bassF * 1.5, th.bpm * 0.95, "sine", th.vol * 0.9);
     // lead entrecroisé
     if (s % th.leadEvery === 0) {
       const f = th.lead[(s / th.leadEvery) % th.lead.length];
-      if (f) this.tone(f, th.bpm * 0.75, th.wave, th.vol);
+      if (f) {
+        this.tone(f, th.bpm * 0.75, th.wave, th.vol);
+        // doublage à l'octave — présent pis chantant au lieu de maigre
+        this.tone(f * 2, th.bpm * 0.6, th.wave === "sawtooth" ? "square" : "sine", th.vol * 0.45, null, t0 + 0.02);
+      }
     }
     // contretemps noise léger (hi-hat de neige)
-    if (M.mode !== "overworld" && s % 2 === 1) this.noise(0.03, 0.018, 6000);
+    if (M.mode !== "overworld" && s % 2 === 1) this.noise(0.04, 0.035, 6000);
     M.step++;
     M.timer = setTimeout(() => this._musicTick(), th.bpm * 1000);
   },
