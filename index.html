@@ -267,7 +267,7 @@ function fmtTime(sec) {
 const INTRO_PANELS = [
   {
     img: "intro1",
-    text: "Le 3 juillet. En pleine canicule. Pis du jour au lendemain, sans prévenir,\nles trottoirs pis les rues se sont recouverts d'une fine couche de glace.\nOn se serait crus sur une patinoire géante. Sauf qu'en juillet,\ny'a pas d'explication — pis ça continue de refroidir."
+    text: "Le 3 juillet. En pleine canicule. On s'est couché fenêtres ouvertes\npour capter un peu d'air, pis au matin... les trottoirs, les rues,\nles poteaux : tout était recouvert d'une fine couche de glace.\nOn se serait crus sur une patinoire géante. En plein mois de juillet."
   },
   {
     img: "intro2",
@@ -2110,7 +2110,8 @@ function drawIntro(ctx) {
     ctx.fillStyle = g2; ctx.fillRect(0, VIEW_H * 0.45, VIEW_W, VIEW_H * 0.55);
   }
   ctx.fillStyle = "#e8eef4"; ctx.font = "7px monospace";
-  wrapText(ctx, panel.text, 18, VIEW_H - 62, VIEW_W - 36, 9);
+  const introLineH = 10;
+  wrapText(ctx, panel.text, 18, VIEW_H - 66, VIEW_W - 36, introLineH);
   ctx.fillStyle = "#7fd4ff"; ctx.font = "7px monospace"; ctx.textAlign = "center";
   ctx.fillText((Game.introIdx + 1) + "/4 — ENTRÉE ▸", VIEW_W / 2, VIEW_H - 8);
   ctx.textAlign = "left";
