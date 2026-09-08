@@ -1,0 +1,2332 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔥</text></svg>">
+<title>LA GRANDE FROIDEUR — Ti-Coq pis l'Roi du Chauffage</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #05070b; height: 100%; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; flex-direction: column; }
+  #game { image-rendering: pixelated; image-rendering: crisp-edges;
+    box-shadow: 0 0 60px rgba(80,140,200,0.25), 0 0 120px rgba(20,40,80,0.5);
+    border: 2px solid #1a2634; border-radius: 4px; }
+  #help { color: #4a5a6e; font-family: monospace; font-size: 12px; margin-top: 10px; user-select: none; }
+  #help b { color: #7fd4ff; }
+</style>
+</head>
+<body>
+<canvas id="game" width="960" height="720"></canvas>
+<div id="help"><b>WASD/ZQSD/Flèches</b> bouger · <b>ESPACE/J</b> poêlon · <b>E/Entrée</b> parler/action · <b>I</b> journal · <b>M</b> son</div>
+<script>
+/* ==== 01_core.js ==== */
+"use strict";
+/* ============================================================
+   LA GRANDE FROIDEUR — Ti-Coq pis l'Roi du Chauffage
+   Un Zelda-like post-apo québécois. Un seul fichier. Pas de build.
+   Le froid a pris le Québec. La flamme a été volée. Va la chercher.
+   ============================================================ */
+
+// ---------- CONSTANTES ----------
+const TILE = 16, VIEW_W = 320, VIEW_H = 240, SCALE = 3;
+const FPS_CAP = 60;
+const SOLID = new Set(["#", "T", "H", "W", "o", "L", "B", "S", "R"]);
+const INTERACT = new Set(["^", "C", "V"]);
+
+// ---------- RNG seedé (reproductible) ----------
+let RNG_STATE = (Date.now() ^ 0x5f3759df) >>> 0;
+function srand() {
+  RNG_STATE ^= RNG_STATE << 13; RNG_STATE >>>= 0;
+  RNG_STATE ^= RNG_STATE >> 17;
+  RNG_STATE ^= RNG_STATE << 5; RNG_STATE >>>= 0;
+  return RNG_STATE / 4294967296;
+}
+function rnd(n) { return Math.floor(srand() * n); }
+function pick(arr) { return arr[rnd(arr.length)]; }
+
+// ---------- INPUT ----------
+const keys = {};
+const pressed = {}; // frame-scoped
+const KEYMAP = {
+  up: ["ArrowUp", "w", "W", "z", "Z"], down: ["ArrowDown", "s", "S"],
+  left: ["ArrowLeft", "a", "A", "q", "Q"], right: ["ArrowRight", "d", "D"],
+  swing: [" ", "j", "J"], interact: ["e", "E", "Enter"],
+  journal: ["i", "I"], mute: ["m", "M"], pause: ["Escape"],
+};
+function keyDown(action) { return KEYMAP[action].some(k => keys[k]); }
+function keyPressed(action) { return KEYMAP[action].some(k => pressed[k]); }
+window.addEventListener("keydown", e => {
+  if (!keys[e.key]) pressed[e.key] = true;
+  keys[e.key] = true;
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(e.key)) e.preventDefault();
+});
+window.addEventListener("keyup", e => { keys[e.key] = false; });
+function clearPressed() { for (const k in pressed) delete pressed[k]; }
+
+// ---------- AUDIO (WebAudio procédural, zéro asset) ----------
+const AudioSys = {
+  ctx: null, master: null, muted: false, windOn: false, windGain: null,
+  init() {
+    if (this.ctx) return;
+    try {
+      this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      this.master = this.ctx.createGain();
+      this.master.gain.value = 0.22;
+      this.master.connect(this.ctx.destination);
+    } catch (e) { this.ctx = null; }
+  },
+  resume() { if (this.ctx && this.ctx.state === "suspended") this.ctx.resume(); },
+  setMuted(m) {
+    this.muted = m;
+    if (this.master) this.master.gain.value = m ? 0 : 0.22;
+  },
+  env(gainNode, t0, a, peak, d) {
+    const g = gainNode.gain;
+    g.setValueAtTime(0.0001, t0);
+    g.linearRampToValueAtTime(peak, t0 + a);
+    g.exponentialRampToValueAtTime(0.0001, t0 + a + d);
+  },
+  tone(freq, dur, type, vol, slideTo, when) {
+    if (!this.ctx) return;
+    const t0 = (when || this.ctx.currentTime);
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.type = type || "square";
+    o.frequency.setValueAtTime(freq, t0);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(20, slideTo), t0 + dur);
+    this.env(g, t0, 0.005, vol || 0.15, dur);
+    o.connect(g); g.connect(this.master);
+    o.start(t0); o.stop(t0 + dur + 0.05);
+  },
+  noise(dur, vol, filterFreq, when) {
+    if (!this.ctx) return;
+    const t0 = (when || this.ctx.currentTime);
+    const len = Math.max(1, Math.floor(this.ctx.sampleRate * dur));
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+    const src = this.ctx.createBufferSource(); src.buffer = buf;
+    const f = this.ctx.createBiquadFilter(); f.type = "bandpass"; f.frequency.value = filterFreq || 1200;
+    const g = this.ctx.createGain();
+    this.env(g, t0, 0.003, vol || 0.12, dur);
+    src.connect(f); f.connect(g); g.connect(this.master);
+    src.start(t0);
+  },
+  // SFX nommés
+  sfx(name) {
+    if (!this.ctx || this.muted) return;
+    switch (name) {
+      case "swing": this.noise(0.12, 0.14, 700); break;
+      case "clang": this.tone(210, 0.08, "square", 0.14, 90); this.noise(0.06, 0.08, 2400); break;
+      case "hurt": this.tone(320, 0.22, "sawtooth", 0.16, 70); break;
+      case "enemyDie": this.noise(0.18, 0.12, 500); this.tone(160, 0.16, "triangle", 0.1, 60); break;
+      case "pickup": this.tone(660, 0.07, "square", 0.09); this.tone(990, 0.09, "square", 0.09, null, this.ctx.currentTime + 0.07); break;
+      case "key": [523, 659, 784].forEach((f, i) => this.tone(f, 0.09, "square", 0.09, null, this.ctx.currentTime + i * 0.08)); break;
+      case "heart": [392, 523, 659, 784].forEach((f, i) => this.tone(f, 0.12, "triangle", 0.1, null, this.ctx.currentTime + i * 0.09)); break;
+      case "chest": [262, 330, 392, 523].forEach((f, i) => this.tone(f, 0.14, "square", 0.1, null, this.ctx.currentTime + i * 0.1)); break;
+      case "blip": this.tone(880, 0.03, "square", 0.05); break;
+      case "roar": this.tone(90, 0.5, "sawtooth", 0.2, 40); this.noise(0.4, 0.1, 300); break;
+      case "bossHit": this.tone(140, 0.14, "square", 0.16, 60); this.noise(0.1, 0.1, 900); break;
+      case "stove": this.noise(0.5, 0.1, 400); this.tone(220, 0.3, "triangle", 0.08, 440); break;
+      case "die": [440, 330, 262, 196].forEach((f, i) => this.tone(f, 0.2, "square", 0.12, null, this.ctx.currentTime + i * 0.15)); break;
+      case "jingle": [523, 523, 523, 659, 784, 1046].forEach((f, i) => this.tone(f, 0.12, "square", 0.1, null, this.ctx.currentTime + i * 0.11)); break;
+      case "shatter": this.noise(0.25, 0.16, 3200); this.tone(1200, 0.1, "triangle", 0.08, 400); break;
+      case "door": this.tone(180, 0.15, "square", 0.1, 120); this.noise(0.12, 0.08, 500); break;
+      case "fireball": this.noise(0.2, 0.1, 600); this.tone(300, 0.15, "sawtooth", 0.07, 150); break;
+      case "sludge": this.tone(90, 0.25, "sawtooth", 0.12, 50); this.noise(0.2, 0.07, 250); break;
+    }
+  },
+  // vent ambiant (bruit filtré + LFO)
+  wind(on) {
+    if (!this.ctx) return;
+    if (on && !this.windOn) {
+      this.windOn = true;
+      const len = this.ctx.sampleRate * 2;
+      const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+      const src = this.ctx.createBufferSource(); src.buffer = buf; src.loop = true;
+      const f = this.ctx.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = 420; f.Q.value = 0.6;
+      const g = this.ctx.createGain(); g.gain.value = 0.05;
+      const lfo = this.ctx.createOscillator(); lfo.frequency.value = 0.13;
+      const lfoG = this.ctx.createGain(); lfoG.gain.value = 180;
+      lfo.connect(lfoG); lfoG.connect(f.frequency);
+      src.connect(f); f.connect(g); g.connect(this.master);
+      src.start(); lfo.start();
+      this.windGain = g;
+    } else if (!on && this.windOn) {
+      this.windOn = false;
+      if (this.windGain) { try { this.windGain.gain.value = 0; } catch (e) {} }
+    }
+  },
+  heartbeat() { this.tone(55, 0.1, "sine", 0.2); this.tone(50, 0.12, "sine", 0.16, null, this.ctx.currentTime + 0.18); }
+};
+
+// ---------- SAVE / LOAD ----------
+const SAVE_KEY = "la_grande_froideur_save_v1";
+function defaultState() {
+  return {
+    hp: 12, maxHp: 12, keys: 0, frags: 0, dmg: 1, speed: 76,
+    map: "overworld", x: 24 * TILE, y: 18 * TILE,
+    flags: {}, openedChests: {}, brokenBlocks: {}, takenKeys: {}, unlockedDoors: {},
+    stovesLit: {}, deaths: 0, playtime: 0, questThermos: 0,
+    bossDefeated: {}, storySeen: {}, endingSeen: false
+  };
+}
+let S = defaultState();
+function saveGame() {
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(S)); return true; } catch (e) { return false; }
+}
+function loadGame() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    S = Object.assign(defaultState(), data);
+    return true;
+  } catch (e) { return null; }
+}
+function hasSave() { try { return !!localStorage.getItem(SAVE_KEY); } catch (e) { return false; } }
+function wipeSave() { try { localStorage.removeItem(SAVE_KEY); } catch (e) {} S = defaultState(); }
+
+// ---------- UTILS ----------
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function dist(ax, ay, bx, by) { return Math.hypot(ax - bx, ay - by); }
+function rectsOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+function fmtTime(sec) {
+  const m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+  return m + ":" + (s < 10 ? "0" : "") + s;
+}
+
+/* ==== 02_data_story.js ==== */
+"use strict";
+/* ============================================================
+   DATA — storyline, dialogues joual (les maps sont générées en 03)
+   ============================================================ */
+
+const INTRO_PANELS = [
+  {
+    img: "intro1",
+    text: "Le 3 juillet. En plein canicule. Le froid est arrivé d'un coup, sans prévenir —\nun froid qui venait pas de la météo, lui. Un froid qui pensait.\nEn quarante-huit heures, tout le Québec était une patinoire avec des poteaux."
+  },
+  {
+    img: "intro2",
+    text: "Pis au milieu de ça, un gars s'est levé. Léo-Paul Gaudreau.\nL'homme qui vendait du mazout à tout le monde avant la Grande Froideur.\nY'a enfermé LA flamme — la dernière vraie flamme du monde —\ndans une lanterne en cage, en haut de sa tour de barils.\nY'a dit : « La chaleur, ça se mérite. Pis c'est moé l'mérite. »"
+  },
+  {
+    img: "intro3",
+    text: "Trois hivers sans flamme. Les poêles du village sont morts un à un.\nToé, t'es Ti-Coq. Y'a rien de spécial à toé : une tuque orange,\nun poêlon en fonte qui appartenait à ta grand-mère, pis une colère tranquille.\nTon poêle, là, devant toé... y'est éteint depuis un mois."
+  },
+  {
+    img: "intro4",
+    text: "Mais ta grand-mère t'a laissé quelque chose avant de s'éteindre avec le poêle :\nsix souvenirs, éparpillés dans le froid comme des braises.\nElle a dit : « La flamme, mon gars, ça s'emprisonne pas. Ça se donne.\nVa pas chercher la flamme de L'Roi. Va chercher c'que t'as déjà. »\nT'as pris ton poêlon. T'as sorti dans le blizzard."
+  }
+];
+
+const FRAGS = [
+  { id: 0, title: "Le poêle de mémère",
+    text: "« Tu te souviens des dimanches. Tout le monde dans la cuisine, la porte fermée,\nla flamme du poêle qui r'garde tout le monde également. Elle chauffait pas parce\nqu'on la possédait. Elle chauffait parce qu'on était là. Chauffer, c'est donner. »" },
+  { id: 1, title: "La tempête de 98",
+    text: "« Les poteaux étaient tombés, le noir pendant trois semaines. Mais tu te souviens\ndes génératrices qui passaient de maison en maison, des casseroles de chili\ndans les halls d'escalier. On s'est serré les bouteons. Le froid perd toujours\ncette game-là, à long terme. »" },
+  { id: 2, title: "La nuit où t'as fermé le poêle",
+    text: "« Tu te souviens de la première nuit sans mémère. T'as fermé le poêle pour\n« économiser ». T'as dormi en boule avec ton manteau, en pensant que c'était ça,\nêtre solide. C'était ça, être afole. La peur, ça chauffe pas. Ça isole. »" },
+  { id: 3, title: "L'Roi avant d'être l'Roi",
+    text: "« Tu te souviens de Léo-Paul. Avant, y'ammenait du mazout aux vieux gratuitement,\nl'été, parce que « ça peut pas leur coûter cher, c'est chaud dehors ». Y'était pas\nméchant. Y'avait juste peur. Le jour où y'a mis la flamme en cage, y'a cru\nqu'y protégeait le monde. Y'a juste arrêté de le toucher. »" },
+  { id: 4, title: "La leçon de la glace",
+    text: "« Tu te souviens de la pêche blanche avec Ghislain. Le poisson, tu peux pas\nl'attraper en serrant. Tu baisses la ligne, tu fais rien, tu attends.\nC'est pareil pour la flamme, pour les gens, pour tout. La chaleur qui serre\nétrangle. La chaleur qui tient laisse de la place. »" },
+  { id: 5, title: "L'Équation Fantôme",
+    text: "« Le secret, mon gars. La flamme a jamais été volée. Y'a rien eu à voler.\nElle s'est éteinte parce que plus personne voulait la garder allumée pour\nl'autre. Le froid, c'est pas L'Roi. Le froid, c'est le calcul : chacun qui\ncompte ce que l'autre lui doit. Ta flamme à toé, elle pèse : la chaleur que\ntu donnes, fois le temps que tu restes, divisée par c'que tu gardes pour toé. »" }
+];
+
+const ENDING_LINES = [
+  "La lanterne en cage est tombée. Dedans, y'avait... rien.\nJuste un bec de gaz éteint. Y'avait jamais eu de flamme dedans.",
+  "L'Roi est resté assis dans son manteau d'or, à r'garder le bec éteint.\nY'a dit : « J'avais froid, moé aussi. » Personne a ri. C'était vrai.",
+  "Ti-Coq est redescendu au village. Y'a versé le peu d'p'tit lait qu'y'avait\ndans le poêlon commun, pis y'a frotté le métal jusqu'à ce que ça brille.",
+  "Y'a allumé le poêle de la place. Pas avec une allumette —\navec le feu qu'y'avait gardé allumé pour les autres depuis le début.\nLe village est venu. Sans que personne le demande.",
+  "Le froid, lui, est resté. Y'est toujours là, en dehors des fenêtres givrées.\nMais dedans, ça sent la soupe aux pois. Pis ça, le froid peut pas le prendre.",
+  "— LA GRANDE FROIDEUR —\nFin. La flamme était à vous depuis le début."
+];
+
+// ---------- NPCS ----------
+const NPCS = [
+  { map: "overworld", x: 13, y: 15, name: "La Veuve Fortin",
+    lines: [
+      "Ti-Coq! T'as l'air d'un homard dans un frigidaire, mon garçon.",
+      "Trente ans que j'habite en haut de la dépanneuse. Le frigo, là-bas... y'gèle de l'intérieur depuis la Grande Froideur. J'entends les porteoli grincer la nuit.",
+      "Si t'y vas... pense au charbon du vieux poêle. Ça s'mange pas, ça s'brûle. Comme les mots de mon défunt. Sauf que ça, ça réchauffe."
+    ] },
+  { map: "overworld", x: 9, y: 22, name: "Ghislain Pâquette",
+    lines: [
+      "La pêche blanche, mon Ti-Coq! Le lac est gelé comme un chèque de pension.",
+      "Le secret : c'est pas le poisson qu'y faut forcer. C'est d'être là, tranquille, avec la bonne miette. Pareil pour la flamme. Pareil pour tout, d'ailleurs.",
+      "Le charbon? J'en mets dans mes bottes. Contre le froid. Ne demande pas."
+    ] },
+  { map: "overworld", x: 24, y: 16, name: "Le Gars Plate",
+    lines: [
+      "Ch'us plate. Ch'us gelé. La dépanneuse est hantée par un frigo qui pense.",
+      "Un poêlon comme arme! Ouain. C'est mieux qu'un couteau. Ça frappe pis ça fait frire. Multitâche, ça.",
+      "Le charbon du vieux poêle de la place... c'est ça qui t'allumera la route. ramasse-en quand tu peux."
+    ] },
+  { map: "overworld", x: 17, y: 25, name: "Docteure Sansregret",
+    lines: [
+      "Le froid r'garde qui vacille, Ti-Coq. Mange, dors, pis swingue fort.",
+      "Une poutine par cœur, la science est claire là-dessus. Une poutine par cœur.",
+      "Le charbon? J'en garde sous ma caisse depuis la fin du monde. C'est... c'est maintenant, là, je pense."
+    ] },
+  { map: "overworld", x: 6, y: 13, name: "Le Vieil Onésime",
+    lines: [
+      "L'Roi du Chauffage... j'l'ai connu quand y'livrait du mazout en vélo.",
+      "Y'a mis la flamme en cage parce qu'y'avait peur qu'elle meure. C'est ça, le trouble avec la peur : elle garde tout pis elle donne rien.",
+      "Prends le charbon de ma cookère, mon garçon. Moé j'ai pus d'souffle pour l'allumer de toute façon."
+    ] }
+];
+
+const SIGNS_TEXT = {
+  dep: "DÉPANNEUR DU COIN — Fermé depuis\nque le frigo a appris à penser.",
+  usine: "USINE #7 — PETROFROID\nInterdit sans bonbonne. Et avec, aussi.",
+  chateau: "LA TOUR À LÉO-PAUL — Château d'barils.\n« La chaleur, ça se mérite. » — L.R.G.",
+  place: "PLACE DU VILLAGE — Poêle commun.\nS'il est éteint, c'est pas l'Roi l'problème.",
+  lake: "LAC GELÉ — Pêche blanche.\nLa glace mince craque. Le gros poisson aussi."
+};
+
+// Portes de donjon dans l'overworld (posées par le générateur)
+const DUNGEON_DOORS = {
+  dep:    { x: 33, y: 14, label: "DÉPANNEUR CONGELÉ", need: null },
+  usine:  { x: 48, y: 37, label: "USINE PETROFROID",  need: "boss_dep" },
+  chateau:{ x: 30, y: 10, label: "LA TOUR À LÉO-PAUL", need: "boss_usine" }
+};
+
+// Coffres du monde (fragments) — positions garanties marchables par le générateur
+const WORLD_CHESTS = [
+  { map: "overworld", x: 4,  y: 20, frag: 1 },  // tempête 98 (ouest)
+  { map: "overworld", x: 55, y: 18, frag: 4 },  // leçon de la glace (sur le lac)
+  { map: "overworld", x: 12, y: 38, frag: 2 },  // nuit sans mémère (sud)
+  { map: "overworld", x: 50, y: 6,  frag: 3 }   // l'Roi avant (nord)
+];
+
+// Ramassables charbon (overworld)
+const CHARBON_SPOTS = [
+  { x: 8, y: 11 }, { x: 25, y: 12 }, { x: 21, y: 20 }, { x: 12, y: 24 },
+  { x: 28, y: 25 }, { x: 36, y: 18 }, { x: 42, y: 28 }, { x: 44, y: 17 },
+  { x: 20, y: 34 }, { x: 40, y: 40 }, { x: 6, y: 30 }, { x: 52, y: 26 }
+];
+
+// Poutines du monde (soins)
+const POUTINE_SPOTS = [
+  { x: 14, y: 14 }, { x: 22, y: 22 }, { x: 34, y: 30 }, { x: 46, y: 12 }
+];
+
+/* ==== 03_world.js ==== */
+"use strict";
+/* ============================================================
+   WORLD v2 — génération seedée robuste
+   Ordre: routes → lac → clearances → structures (cèdent aux routes)
+   → POI tiles → lampadaires. Validation BFS à chaque enterMap.
+   ============================================================ */
+
+const W_SEED = 20260703;
+let WR = W_SEED >>> 0;
+function wrnd() { WR ^= WR << 13; WR >>>= 0; WR ^= WR >> 17; WR ^= WR << 5; WR >>>= 0; return WR / 4294967296; }
+
+const MAP_W = 60, MAP_H = 40;
+const WALK = new Set([".", ",", "~", "k", "c", "q", "E", "p"]);
+const SOLIDS = new Set(["#", "T", "H", "o", "L", "B", "S", "R", "^", "C", "x", "D", "d"]);
+
+let MAP = null;
+let worldSpawns = [];
+let camera = { x: 0, y: 0 };
+
+function g(x, y) { return (MAP && y >= 0 && y < MAP.h && x >= 0 && x < MAP.w) ? MAP.grid[y][x] : "#"; }
+function setTile(x, y, ch) { if (MAP && x >= 0 && y >= 0 && x < MAP.w && y < MAP.h) MAP.grid[y][x] = ch; }
+function solidAt(px, py) { return SOLIDS.has(g(Math.floor(px / TILE), Math.floor(py / TILE))); }
+function tileAt(px, py) { return g(Math.floor(px / TILE), Math.floor(py / TILE)); }
+
+function carveRect(grid, x0, y0, x1, y1, ch) {
+  for (let y = Math.max(1, y0); y <= Math.min(MAP_H - 2, y1); y++)
+    for (let x = Math.max(1, x0); x <= Math.min(MAP_W - 2, x1); x++) grid[y][x] = ch;
+}
+function carveCircle(grid, cx, cy, r, ch) {
+  for (let y = cy - r; y <= cy + r; y++)
+    for (let x = cx - r; x <= cx + r; x++) {
+      if (Math.hypot(x - cx, y - cy) <= r + 0.3 && x >= 1 && y >= 1 && x < MAP_W - 1 && y < MAP_H - 1) grid[y][x] = ch;
+    }
+}
+function carveRoad(grid, x0, y0, x1, y1) {
+  let x = x0, y = y0, guard = 900;
+  while ((x !== x1 || y !== y1) && guard-- > 0) {
+    const r = wrnd();
+    if (Math.abs(x1 - x) > Math.abs(y1 - y)) { if (r < 0.85) x += Math.sign(x1 - x); else y += Math.sign(y1 - y); }
+    else { if (r < 0.85) y += Math.sign(y1 - y); else x += Math.sign(x1 - x); }
+    x = clamp(x, 1, MAP_W - 2); y = clamp(y, 1, MAP_H - 2);
+    grid[y][x] = ","; grid[y][clamp(x + 1, 1, MAP_W - 2)] = ","; grid[clamp(y + 1, 1, MAP_H - 2)][x] = ",";
+  }
+  grid[y1][x1] = ","; grid[y1][clamp(x1 + 1, 1, MAP_W - 2)] = ","; grid[clamp(y1 + 1, 1, MAP_H - 2)][x1] = ",";
+}
+function carvePolyline(grid, pts) {
+  for (let i = 0; i < pts.length - 1; i++) carveRoad(grid, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]);
+}
+
+// POI logiques (les structures peuvent shifter; portes/registres recalculés)
+const POI = {
+  spawn: [24, 24], place: [18, 13], stove: [18, 13],
+  depWant: [33, 15], usineWant: [48, 39], chateauWant: [30, 14],
+  chestW: [4, 20], chestS: [12, 38], chestN: [50, 6], lake: [54, 19],
+  npc: { fortin: [35, 17], ghislain: [21, 17], plate: [21, 15], sansregret: [18, 18], onesime: [12, 12] }
+};
+
+function genOverworld() {
+  WR = W_SEED >>> 0;
+  const grid = [];
+  for (let y = 0; y < MAP_H; y++) grid.push(new Array(MAP_W).fill("#"));
+
+  // ---- 1) ROUTES (polylines routées autour des zones connues) ----
+  carvePolyline(grid, [[24, 24], [18, 20], [18, 14]]);            // spawn → place (sud)
+  carvePolyline(grid, [[18, 13], [28, 18], [33, 15]]);            // place → dépanneur
+  carvePolyline(grid, [[33, 15], [30, 14]]);                      // dépanneur → château
+  carvePolyline(grid, [[30, 14], [38, 17], [44, 19]]);            // château → rive ouest du lac
+  carvePolyline(grid, [[44, 19], [4, 20]]);                       // rive ouest → coffre ouest
+  carvePolyline(grid, [[54, 25], [50, 31], [48, 39]]);            // rive sud du lac → usine
+  carvePolyline(grid, [[48, 39], [12, 38]]);                      // usine → coffre sud
+  carvePolyline(grid, [[12, 38], [24, 24]]);                      // coffre sud → spawn
+  carvePolyline(grid, [[24, 24], [12, 12]]);                      // spawn → Onésime (nord-ouest)
+  carvePolyline(grid, [[50, 6], [40, 12], [44, 19]]);             // coffre nord → rive ouest
+
+  // ---- 2) LAC GELÉ (ellipse + canaux de traverse) ----
+  for (let y = 14; y <= 24; y++) for (let x = 46; x <= 58; x++) {
+    const dx = (x - 52) / 6.2, dy = (y - 19) / 4.4;
+    const d = dx * dx + dy * dy;
+    if (d < 1 && x >= 1 && y >= 1 && x < MAP_W - 1 && y < MAP_H - 1) grid[y][x] = d > 0.62 ? "x" : "~";
+  }
+  for (let x = 44; x <= 53; x++) grid[19][x] = "~";   // canal ouest → coffre du lac
+  for (let y = 20; y <= 25; y++) grid[y][54] = "~";   // canal sud → rive usine (démarre SOUS le coffre)
+
+  // ---- 3) CLEARANCES ( overwrite routes avec "." — les deux marchables) ----
+  carveCircle(grid, 24, 24, 3, ".");
+  carveCircle(grid, 18, 13, 4, ".");
+  carveCircle(grid, 33, 15, 4, ".");
+  carveCircle(grid, 48, 39, 4, ".");
+  carveCircle(grid, 30, 14, 4, ".");
+  carveCircle(grid, 4, 20, 2, ".");
+  carveCircle(grid, 12, 38, 2, ".");
+  carveCircle(grid, 50, 6, 2, ".");
+  carveCircle(grid, 12, 12, 2, ".");
+  carveCircle(grid, 16, 16, 2, ".");
+  carveCircle(grid, 21, 17, 2, ".");
+  carveCircle(grid, 21, 15, 2, ".");
+  carveCircle(grid, 18, 18, 2, ".");
+  carveCircle(grid, 35, 17, 2, ".");   // Fortin près du dépanneur
+
+  // ---- 4) STRUCTURES (placées en évitant les cellules de route) ----
+  const occupied = new Set();
+  function placeStructure(wantX, wantY, w, h, roofCh, wallCh, name) {
+    const fits = (x0, y0) => {
+      for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) {
+        if (x < 1 || y < 1 || x >= MAP_W - 1 || y >= MAP_H - 1) return false;
+        const ch = grid[y][x];
+        if (ch === "," || ch === "^" || ch === "S" || occupied.has(x + "," + y)) return false;
+      }
+      const doorCol = x0 + Math.floor(w / 2);
+      const below = grid[y0 + h] ? grid[y0 + h][doorCol] : "#";
+      return below === "." || below === "," || below === "~";
+    };
+    // spirale autour de la position voulue
+    for (let r = 0; r < 6; r++) {
+      for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x0 = wantX + dx, y0 = wantY + dy;
+        if (fits(x0, y0)) {
+          for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) {
+            grid[y][x] = (y === y0) ? roofCh : wallCh;
+            occupied.add(x + "," + y);
+          }
+          const doorCol = x0 + Math.floor(w / 2);
+          grid[y0 + h - 1][doorCol] = "o";
+          occupied.add(doorCol + "," + (y0 + h - 1));
+          return { x: x0, y: y0, w, h, door: null };
+        }
+      }
+    }
+    console.error("[WORLD] placeStructure a échoué pour", name);
+    return null;
+  }
+  // maisons du village (petites, toit T, murs H)
+  [[13, 10], [21, 10], [13, 15], [22, 19], [9, 12]].forEach(([hx, hy], i) => {
+    placeStructure(hx, hy, 4, 3, "T", "H", "maison" + i);
+  });
+  // dépanneur (7x4) — porte D sud, gérée à part
+  const dep = placeBig(grid, 30, 11, 7, 4, occupied, "dep");
+  // usine (8x5)
+  const usine = placeBig(grid, 44, 34, 8, 5, occupied, "usine");
+  // château: tour de barils (9x8)
+  const chateau = placeBarrelTower(grid, 26, 6, 9, 8, occupied, "chateau");
+
+  // ---- 5) POI TILES ----
+  // poêle commun + affiche
+  grid[13][18] = "S";
+  // coffres monde (sur cellules libres, pas sur les routes)
+  const chestRegistry = {};
+  function placeChest(wx, wy, fragId, allowIce) {
+    outer:
+    for (let r = 0; r < 5; r++) {
+      for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+        const x = clamp(wx + dx, 1, MAP_W - 2), y = clamp(wy + dy, 1, MAP_H - 2);
+        const ch = grid[y][x];
+        const ok = (ch === ".") || (allowIce && ch === "~");
+        if (ok && !occupied.has(x + "," + y) && !(x === POI.spawn[0] && y === POI.spawn[1])) {
+          grid[y][x] = "C";
+          chestRegistry[x + "," + y] = fragId;
+          occupied.add(x + "," + y);
+          break outer;
+        }
+      }
+    }
+  }
+  placeChest(4, 20, 1);
+  placeChest(12, 38, 2);
+  // (50,6) reste un coffre SANS fragment: le registre des frags de monde est complet
+  // (3 boss: 0,3,5 + 3 coffres: 1,2,4 = 6). Le 4e coffre donne du charbon bonus.
+  // coffre du lac posé APRÈS les canaux (sinon écrasé par le canal sud)
+  grid[19][54] = "C";
+  chestRegistry["54,19"] = 4;
+
+  // charbon + poutines (tuiles ramassables "c"/"q" sur cellules marchables)
+  CHARBON_SPOTS.forEach(s => { const [cx, cy] = nearestWalkable(grid, s.x, s.y); grid[cy][cx] = "c"; });
+  POUTINE_SPOTS.forEach(s => { const [cx, cy] = nearestWalkable(grid, s.x, s.y); grid[cy][cx] = "q"; });
+
+  // affiches (à côté des portes + lac + poêle)
+  const signRegistry = {};
+  function placeSign(x, y, text) {
+    for (let r = 0; r < 4; r++) for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      const sx = clamp(x + dx, 1, MAP_W - 2), sy = clamp(y + dy, 1, MAP_H - 2);
+      if ((grid[sy][sx] === "." || grid[sy][sx] === ",") && !occupied.has(sx + "," + sy)) {
+        grid[sy][sx] = "^";
+        signRegistry[sx + "," + sy] = text;
+        occupied.add(sx + "," + sy);
+        return;
+      }
+    }
+  }
+
+  // portes de donjon: dépanneur/usine/château (dynamiques)
+  DUNGEON_DOORS.dep.x = dep.door[0]; DUNGEON_DOORS.dep.y = dep.door[1];
+  DUNGEON_DOORS.usine.x = usine.door[0]; DUNGEON_DOORS.usine.y = usine.door[1];
+  DUNGEON_DOORS.chateau.x = chateau.door[0]; DUNGEON_DOORS.chateau.y = chateau.door[1];
+  placeSign(DUNGEON_DOORS.dep.x - 2, DUNGEON_DOORS.dep.y, SIGNS_TEXT.dep);
+  placeSign(DUNGEON_DOORS.usine.x - 2, DUNGEON_DOORS.usine.y, SIGNS_TEXT.usine);
+  placeSign(DUNGEON_DOORS.chateau.x - 2, DUNGEON_DOORS.chateau.y, SIGNS_TEXT.chateau);
+  placeSign(18, 12, SIGNS_TEXT.place);
+  placeSign(46, 21, SIGNS_TEXT.lake);
+
+  // lampadaires (sur routes, jamais sur les 2 voies complètes)
+  for (let i = 0; i < 22; i++) {
+    const x = 2 + Math.floor(wrnd() * (MAP_W - 4)), y = 2 + Math.floor(wrnd() * (MAP_H - 4));
+    if (grid[y][x] === "," && grid[y][x + 1] === ",") grid[y][x] = "L";
+  }
+
+  MAP = { name: "overworld", grid, w: MAP_W, h: MAP_H, outdoor: true, theme: "snow", poi: POI,
+          chestRegistry, signRegistry, doorTiles: {}, npcPos: JSON.parse(JSON.stringify(POI.npc)) };
+  return POI;
+}
+
+// bâtiment avec porte D (donjon) au sud
+function placeBig(grid, wantX, wantY, w, h, occupied, name) {
+  const fits = (x0, y0) => {
+    for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) {
+      if (x < 1 || y < 1 || x >= MAP_W - 1 || y >= MAP_H - 1) return false;
+      const ch = grid[y][x];
+      if (ch === "," || ch === "^" || ch === "S" || ch === "C" || ch === "~" || ch === "x" || occupied.has(x + "," + y)) return false;
+    }
+    const doorCol = x0 + Math.floor(w / 2);
+    const below = grid[y0 + h] ? grid[y0 + h][doorCol] : "#";
+    return below === "." || below === ",";
+  };
+  for (let r = 0; r < 6; r++) {
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+      const x0 = wantX + dx, y0 = wantY + dy;
+      if (fits(x0, y0)) {
+        for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) {
+          grid[y][x] = (y === y0) ? "T" : "H";
+          occupied.add(x + "," + y);
+        }
+        const doorCol = x0 + Math.floor(w / 2);
+        grid[y0 + h - 1][doorCol] = "D";
+        occupied.add(doorCol + "," + (y0 + h - 1));
+        return { x: x0, y: y0, w, h, door: [doorCol, y0 + h - 1] };
+      }
+    }
+  }
+  console.error("[WORLD] placeBig FAILED:", name);
+  return { door: [wantX + 3, wantY + h - 1] };
+}
+
+// tour de barils (château)
+function placeBarrelTower(grid, wantX, wantY, w, h, occupied, name) {
+  const fits = (x0, y0) => {
+    for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) {
+      if (x < 1 || y < 1 || x >= MAP_W - 1 || y >= MAP_H - 1) return false;
+      const ch = grid[y][x];
+      if (ch === "," || ch === "^" || ch === "S" || ch === "C" || ch === "~" || ch === "x" || occupied.has(x + "," + y)) return false;
+    }
+    const doorCol = x0 + Math.floor(w / 2);
+    const below = grid[y0 + h] ? grid[y0 + h][doorCol] : "#";
+    return below === "." || below === ",";
+  };
+  for (let r = 0; r < 6; r++) {
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+      const x0 = wantX + dx, y0 = wantY + dy;
+      if (fits(x0, y0)) {
+        for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) {
+          grid[y][x] = (wrnd() < 0.25) ? "T" : "B";
+          occupied.add(x + "," + y);
+        }
+        const doorCol = x0 + Math.floor(w / 2);
+        grid[y0 + h - 1][doorCol] = "D";
+        occupied.add(doorCol + "," + (y0 + h - 1));
+        return { x: x0, y: y0, w, h, door: [doorCol, y0 + h - 1] };
+      }
+    }
+  }
+  console.error("[WORLD] placeBarrelTower FAILED:", name);
+  return { door: [wantX + 4, wantY + h - 1] };
+}
+
+function nearestWalkable(grid, x, y) {
+  x = clamp(x, 1, MAP_W - 2); y = clamp(y, 1, MAP_H - 2);
+  if (grid[y][x] === "." || grid[y][x] === ",") return [x, y];
+  for (let r = 1; r < 9; r++) {
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      const nx = x + dx, ny = y + dy;
+      if (nx < 1 || ny < 1 || nx >= MAP_W - 1 || ny >= MAP_H - 1) continue;
+      if (grid[ny][nx] === "." || grid[ny][nx] === ",") return [nx, ny];
+    }
+  }
+  return [x, y];
+}
+
+// ---------- DONJONS (authorés, 26x20) ----------
+function buildDungeon(name) {
+  const W = 26, H = 20;
+  const grid = [];
+  for (let y = 0; y < H; y++) grid.push(new Array(W).fill("#"));
+  const chests = {};
+  const F = { dep: ".", usine: ",", chateau: "," }[name];
+  const room = (x0, y0, x1, y1, ch) => { for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) grid[y][x] = ch || F; };
+  const put = (x, y, ch) => { grid[y][x] = ch; };
+
+  if (name === "dep") {
+    room(10, 15, 14, 17); room(4, 9, 16, 13); room(18, 4, 23, 9); room(19, 12, 23, 14); room(18, 16, 24, 19);
+    put(12, 14, F);
+    put(16, 8, F); put(16, 7, F); put(17, 7, F);   // couloir allée→frigos (col 16-17)
+    put(17, 12, F); put(18, 12, F);
+    put(21, 15, "d");
+    for (let y = 4; y <= 9; y++) put(21, y, "R");  // mur de glace
+    put(23, 6, "k");
+    chests["23,8"] = "coeur_max"; put(23, 8, "C");
+    put(18, 11, "R"); put(9, 11, "R");
+    put(21, 18, "X");
+  } else if (name === "usine") {
+    room(10, 15, 14, 17); room(4, 8, 11, 13); room(15, 4, 21, 9); room(17, 12, 22, 14);
+    room(16, 16, 23, 19, "p");
+    put(11, 14, F);
+    for (let x = 12; x <= 14; x++) put(x, 9, F);
+    put(19, 10, F); put(19, 11, F);
+    put(20, 15, "d");
+    put(6, 10, "p"); put(7, 10, "p"); put(6, 11, "p");
+    put(17, 6, "p"); put(18, 6, "p");
+    put(20, 5, "k");
+    chests["5,9"] = "dmg_up"; put(5, 9, "C");
+    [[18, 17], [20, 17], [22, 17], [19, 18], [21, 18]].forEach(([x, y]) => put(x, y, ","));
+    put(20, 18, "X");
+  } else {
+    room(10, 15, 14, 17); room(5, 8, 15, 12); room(17, 8, 22, 12); room(16, 15, 23, 19);
+    put(12, 13, F); put(12, 14, F);
+    put(16, 10, F);
+    put(19, 13, F); put(19, 14, "d");
+    for (let y = 8; y <= 12; y++) for (let x = 5; x <= 15; x++) if ((x + y) % 3 === 0 && !(x === 12 && y >= 11) && x !== 8 && Math.hypot(x - 6, y - 9) > 2.5) put(x, y, "B");
+    put(6, 9, "k");
+    chests["6,8"] = "coeur_max"; put(6, 8, "C");
+    put(17, 16, "R"); put(21, 16, "R"); put(17, 18, "R");
+    put(19, 17, "X");
+  }
+  put(12, 17, "E");
+  return { name, grid, w: W, h: H, outdoor: false, theme: name, chests, chestRegistry: {}, signRegistry: {} };
+}
+
+const dungeonSpawns = {
+  dep: [{ type: "blob", x: 6 * TILE, y: 10 * TILE }, { type: "blob", x: 14 * TILE, y: 11 * TILE }, { type: "frigo", x: 19 * TILE, y: 7 * TILE }],
+  usine: [{ type: "mardeux", x: 6 * TILE, y: 9 * TILE }, { type: "mardeux", x: 17 * TILE, y: 6 * TILE }, { type: "blob", x: 19 * TILE, y: 13 * TILE }],
+  chateau: [{ type: "mardeux", x: 8 * TILE, y: 10 * TILE }, { type: "wolf", x: 18 * TILE, y: 9 * TILE }, { type: "frigo", x: 20 * TILE, y: 11 * TILE }]
+};
+const dungeonEntry = { dep: [12, 16], usine: [12, 16], chateau: [12, 16] };
+
+// ---------- validation BFS ----------
+function bfsReachable(grid, w, h, sx, sy, walkFn) {
+  const seen = new Set([sx + "," + sy]);
+  const q = [[sx, sy]];
+  while (q.length) {
+    const [x, y] = q.pop();
+    [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(([dx, dy]) => {
+      const nx = x + dx, ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h) return;
+      const k = nx + "," + ny;
+      if (seen.has(k)) return;
+      if (walkFn(grid[ny][nx])) { seen.add(k); q.push([nx, ny]); }
+    });
+  }
+  return seen;
+}
+
+function validateOverworld() {
+  const { grid, w, h } = MAP;
+  const reach = bfsReachable(grid, w, h, POI.spawn[0], POI.spawn[1],
+    ch => WALK.has(ch) || ["C", "c", "q", "^", "S", "D"].includes(ch));
+  let fail = 0;
+  const near = (x, y) => reach.has(x + "," + y) || [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]].some(([dx, dy]) => reach.has((x + dx) + "," + (y + dy)));
+  const checks = [
+    ["porte dep", DUNGEON_DOORS.dep.x, DUNGEON_DOORS.dep.y],
+    ["porte usine", DUNGEON_DOORS.usine.x, DUNGEON_DOORS.usine.y],
+    ["porte chateau", DUNGEON_DOORS.chateau.x, DUNGEON_DOORS.chateau.y],
+    ["poele", 18, 13],
+    ["npc fortin", ...MAP.npcPos.fortin], ["npc ghislain", ...MAP.npcPos.ghislain],
+    ["npc plate", ...MAP.npcPos.plate], ["npc sansregret", ...MAP.npcPos.sansregret],
+    ["npc onesime", ...MAP.npcPos.onesime]
+  ];
+  Object.keys(MAP.chestRegistry).forEach(k => checks.push(["coffre " + k, ...k.split(",").map(Number)]));
+  Object.keys(MAP.signRegistry).forEach(k => checks.push(["affiche " + k, ...k.split(",").map(Number)]));
+  checks.forEach(([nm, x, y]) => { if (!near(x, y)) { console.error("[WORLD] UNREACHABLE:", nm, x, y); fail++; } });
+  console.log("[WORLD] overworld reachability:", fail === 0 ? "OK" : fail + " FAILS", "(" + reach.size + " cellules)");
+  return fail === 0;
+}
+
+function validateDungeon(name) {
+  const d = buildDungeon(name);
+  const F = { dep: ".", usine: ",", chateau: "," }[name];
+  // phase 1: clé atteignable en cassant R et B (le poêlon casse les deux, d reste solide)
+  const p1 = bfsReachable(d.grid, d.w, d.h, 12, 17, ch => WALK.has(ch) || ch === "R" || ch === "B");
+  let keyPos = null;
+  for (let y = 0; y < d.h; y++) for (let x = 0; x < d.w; x++) if (d.grid[y][x] === "k") keyPos = [x, y];
+  let fail = 0;
+  if (!keyPos || !p1.has(keyPos[0] + "," + keyPos[1])) { console.error("[" + name + "] clé injoignable"); fail++; }
+  // phase 2: R cassé + d ouverte → boss + coffres (X/C solides; B cassable = franchissable)
+  const g2 = d.grid.map(r => r.slice());
+  for (let y = 0; y < d.h; y++) for (let x = 0; x < d.w; x++) { if (g2[y][x] === "R" || g2[y][x] === "d") g2[y][x] = F; }
+  const p2 = bfsReachable(g2, d.w, d.h, 12, 17, ch => WALK.has(ch) || ch === "B");
+  const nearReach = (x, y) => p2.has(x + "," + y) || [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => p2.has((x + dx) + "," + (y + dy)));
+  let bossPos = null;
+  for (let y = 0; y < d.h; y++) for (let x = 0; x < d.w; x++) if (g2[y][x] === "X") bossPos = [x, y];
+  if (!bossPos || !nearReach(bossPos[0], bossPos[1])) { console.error("[" + name + "] boss injoignable"); fail++; }
+  Object.keys(d.chests).forEach(k => { const [x, y] = k.split(",").map(Number); if (!nearReach(x, y)) { console.error("[" + name + "] coffre injoignable", k); fail++; } });
+  console.log("[" + name + "] dungeon reachability:", fail === 0 ? "OK" : fail + " FAILS");
+  return fail === 0;
+}
+
+// ---------- collisions ----------
+function collides(x, y, w, h) {
+  const x0 = Math.floor(x / TILE), x1 = Math.floor((x + w - 0.01) / TILE);
+  const y0 = Math.floor(y / TILE), y1 = Math.floor((y + h - 0.01) / TILE);
+  for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) if (SOLIDS.has(g(tx, ty))) return true;
+  return false;
+}
+function moveWithCollision(ent, dx, dy) {
+  if (dx !== 0) {
+    const s = Math.sign(dx);
+    let rem = Math.abs(dx);
+    while (rem > 0) {
+      const step = Math.min(1, rem);
+      if (!collides(ent.x + s * step, ent.y, ent.w, ent.h)) ent.x += s * step;
+      else break;
+      rem -= step;
+    }
+  }
+  if (dy !== 0) {
+    const s = Math.sign(dy);
+    let rem = Math.abs(dy);
+    while (rem > 0) {
+      const step = Math.min(1, rem);
+      if (!collides(ent.x, ent.y + s * step, ent.w, ent.h)) ent.y += s * step;
+      else break;
+      rem -= step;
+    }
+  }
+  if (MAP) {
+    ent.x = clamp(ent.x, TILE, MAP.w * TILE - TILE - ent.w);
+    ent.y = clamp(ent.y, TILE, MAP.h * TILE - TILE - ent.h);
+  }
+}
+function tileOfCenter(ent) { return g(Math.floor((ent.x + ent.w / 2) / TILE), Math.floor((ent.y + ent.h / 2) / TILE)); }
+function onIce(ent) { return tileOfCenter(ent) === "~"; }
+function inSludge(ent) { return tileOfCenter(ent) === "p"; }
+
+function genOverworldSpawns() {
+  const spots = [];
+  for (let y = 2; y < MAP_H - 2; y++) for (let x = 2; x < MAP_W - 2; x++) {
+    const ch = MAP.grid[y][x];
+    if ((ch === "." || ch === ",") && dist(x, y, 18, 13) > 9 && dist(x, y, 24, 24) > 6) spots.push([x, y]);
+  }
+  for (let i = spots.length - 1; i > 0; i--) { const j = Math.floor(wrnd() * (i + 1)); [spots[i], spots[j]] = [spots[j], spots[i]]; }
+  worldSpawns = [];
+  const plan = [{ t: "blob", n: 6 }, { t: "wolf", n: 5 }, { t: "frigo", n: 3 }, { t: "mardeux", n: 4 }];
+  let si = 0;
+  plan.forEach(({ t, n }) => {
+    for (let i = 0; i < n && si < spots.length; i++) {
+      const [x, y] = spots[si++];
+      worldSpawns.push({ type: t, x: x * TILE + 2, y: y * TILE + 2 });
+    }
+  });
+}
+
+function applyPersistentTiles() {
+  // blocs cassés + portes déverrouillées (persistés)
+  for (const [k, v] of Object.entries(S.brokenBlocks)) {
+    if (!v) continue;
+    const [m, xs, ys] = k.split(":");
+    if (m === S.map) setTile(Number(xs), Number(ys), S.map === "overworld" ? "." : floorCh(S.map));
+  }
+  for (const [k, v] of Object.entries(S.unlockedDoors || {})) {
+    if (!v) continue;
+    const [m, xs, ys] = k.split(":");
+    if (m === S.map) setTile(Number(xs), Number(ys), floorCh(S.map));
+  }
+}
+
+function enterMap(name, entryTile) {
+  if (name === "overworld") {
+    genOverworld();
+    applyPersistentTiles();
+    validateOverworld();
+    genOverworldSpawns();
+    if (entryTile) { S.x = entryTile.x * TILE + 2; S.y = entryTile.y * TILE + 2; }
+    else { S.x = POI.spawn[0] * TILE + 2; S.y = POI.spawn[1] * TILE + 2; }
+  } else {
+    MAP = buildDungeon(name);
+    applyPersistentTiles();
+    validateDungeon(name); // BFS runtime: clé puis boss/coffres (garde-fou anti-softlock)
+    const e = entryTile || { x: dungeonEntry[name][0], y: dungeonEntry[name][1] };
+    S.x = e.x * TILE + 2; S.y = e.y * TILE + 2;
+  }
+  S.map = name;
+  saveGame();
+  Entities.reset();
+  AudioSys.wind(MAP.outdoor === true);
+  Game.exitCd = 0.6;
+  camera.x = clamp(S.x - VIEW_W / 2, 0, MAP.w * TILE - VIEW_W);
+  camera.y = clamp(S.y - VIEW_H / 2, 0, MAP.h * TILE - VIEW_H);
+}
+
+function floorCh(name) { return { dep: ".", usine: ",", chateau: "," }[name] || "."; }
+
+/* ==== 04_entities.js ==== */
+"use strict";
+/* ============================================================
+   ENTITIES — player, ennemis, projectiles, boss, pickups
+   ============================================================ */
+
+const Entities = {
+  enemies: [], bullets: [], pickups: [], particles: [],
+  swing: null, // { x, y, w, h, t, dir }
+  boss: null,
+
+  reset() {
+    this.enemies = []; this.bullets = []; this.pickups = []; this.particles = [];
+    this.swing = null; this.boss = null;
+    const spawns = S.map === "overworld" ? worldSpawns : (dungeonSpawns[S.map] || []);
+    spawns.forEach(s => {
+      if (inSludge({ x: s.x, y: s.y, w: 12, h: 12 })) return;
+      this.enemies.push(makeEnemy(s.type, s.x, s.y));
+    });
+    // Boss par donjon
+    if (S.map === "dep" && !S.bossDefeated.frigor) {
+      this.boss = makeBoss("frigor");
+    } else if (S.map === "usine" && !S.bossDefeated.sludger) {
+      this.boss = makeBoss("sludger");
+    } else if (S.map === "chateau" && !S.bossDefeated.roi) {
+      this.boss = makeBoss("roi");
+    }
+    // charbon/poutines overworld non ramassés
+    if (S.map === "overworld") {
+      CHARBON_SPOTS.forEach((s, i) => {
+        const id = "charbon" + i;
+        if (!S.takenKeys[id]) {
+          const [cx, cy] = nearestWalkable(MAP.grid, s.x, s.y);
+          this.pickups.push({ kind: "charbon", x: cx * TILE + 4, y: cy * TILE + 4, w: 10, h: 10, id });
+        }
+      });
+      POUTINE_SPOTS.forEach((s, i) => {
+        const id = "poutine" + i;
+        if (!S.takenKeys[id]) {
+          const [cx, cy] = nearestWalkable(MAP.grid, s.x, s.y);
+          this.pickups.push({ kind: "poutine", x: cx * TILE + 4, y: cy * TILE + 4, w: 10, h: 10, id });
+        }
+      });
+    }
+    // Player object
+    this.player = {
+      x: S.x, y: S.y, w: 10, h: 12,
+      dir: "down", vx: 0, vy: 0,
+      swingCd: 0, swingT: 0, iFrames: 0, step: 0, moving: false,
+      onIce: false, iceVx: 0, iceVy: 0,
+      pushT: 0
+    };
+  },
+
+  update(dt) {
+    this.updatePlayer(dt);
+    this.updateSwing(dt);
+    this.enemies.forEach(e => updateEnemy(e, dt, this));
+    this.enemies = this.enemies.filter(e => e.hp > 0);
+    if (this.boss) updateBoss(this.boss, dt, this);
+    this.updateBullets(dt);
+    this.updatePickups(dt);
+    this.particles = this.particles.filter(p => (p.t -= dt) > 0);
+    this.particles.forEach(p => { p.x += p.vx * dt; p.y += p.vy * dt; });
+  },
+
+  updatePlayer(dt) {
+    const p = this.player;
+    let dx = 0, dy = 0;
+    if (keyDown("left")) dx -= 1;
+    if (keyDown("right")) dx += 1;
+    if (keyDown("up")) dy -= 1;
+    if (keyDown("down")) dy += 1;
+    const diag = dx !== 0 && dy !== 0 ? 0.7071 : 1;
+    const spd = S.speed * diag;
+
+    // glace : momentum
+    p.onIce = onIce(p);
+    if (p.onIce) {
+      p.iceVx = p.iceVx * 0.96 + (dx * spd * 0.04);
+      p.iceVy = p.iceVy * 0.96 + (dy * spd * 0.04);
+      dx = p.iceVx / spd; dy = p.iceVy / spd;
+    } else { p.iceVx = p.iceVy = 0; }
+
+    p.moving = (dx !== 0 || dy !== 0);
+    if (p.moving) {
+      if (dx > 0) p.dir = "right"; else if (dx < 0) p.dir = "left";
+      if (dy > 0 && dx === 0) p.dir = "down"; else if (dy < 0 && dx === 0) p.dir = "up";
+      else if (dy > 0) p.dir = dx > 0 ? "right" : "left";
+      else if (dy < 0) p.dir = dx > 0 ? "right" : "left";
+      p.step += dt * 8;
+    }
+    if (p.iFrames > 0) p.iFrames -= dt;
+    if (p.swingCd > 0) p.swingCd -= dt;
+    if (p.pushT > 0) p.pushT -= dt;
+
+    // knockback override
+    if (p.pushT > 0) {
+      moveWithCollision(p, p.kbVx * dt, p.kbVy * dt);
+    } else if (p.moving || p.onIce) {
+      moveWithCollision(p, dx * spd * dt, dy * spd * dt);
+    }
+
+    // sludge damage
+    if (inSludge(p)) {
+      hurtPlayer(1, null, true);
+    }
+
+    // swing
+    if (keyPressed("swing") && p.swingCd <= 0) {
+      p.swingCd = 0.32;
+      this.swing = { t: 0.18, dir: p.dir };
+      AudioSys.sfx("swing");
+      const r = swingRect(p.dir, p.x, p.y, p.w, p.h);
+      this._swingRect = r;
+      // casse les blocs R / touche les ennemis dans le updateSwing
+    }
+    // interact
+    if (keyPressed("interact")) tryInteract();
+    S.x = p.x; S.y = p.y;
+  },
+
+  updateSwing(dt) {
+    if (!this.swing) return;
+    this.swing.t -= dt;
+    const r = this._swingRect;
+    // touche ennemis
+    this.enemies.forEach(e => {
+      if (e.hitCd > 0) return;
+      if (rectsOverlap(r, e)) {
+        e.hp -= S.dmg; e.hitCd = 0.25; e.flash = 0.12;
+        const cx = (r.x + r.w / 2), cy = (r.y + r.h / 2);
+        const ang = Math.atan2(e.y + e.h / 2 - cy, e.x + e.w / 2 - cx);
+        e.kb = { vx: Math.cos(ang) * 140, vy: Math.sin(ang) * 140, t: 0.14 };
+        AudioSys.sfx(e.hp <= 0 ? "enemyDie" : "clang");
+        spawnParticles(e.x + e.w / 2, e.y + e.h / 2, 4, "#cfe8ff");
+      }
+    });
+    if (this.boss && this.boss.iHit <= 0 && rectsOverlap(r, this.boss)) {
+      this.boss.hp -= S.dmg; this.boss.iHit = 0.3; this.boss.flash = 0.15;
+      AudioSys.sfx("bossHit");
+      spawnParticles(this.boss.x + this.boss.w / 2, this.boss.y + this.boss.h / 2, 6, "#ffd27f");
+    }
+    // casse blocs de glace / barils dans la zone
+    const x0 = Math.floor(r.x / TILE), x1 = Math.floor((r.x + r.w) / TILE);
+    const y0 = Math.floor(r.y / TILE), y1 = Math.floor((r.y + r.h) / TILE);
+    for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) {
+      const ch = g(tx, ty);
+      if (ch === "R" || (ch === "B" && S.map !== "overworld")) {
+        setTile(tx, ty, S.map === "overworld" ? "." : floorCh(S.map));
+        S.brokenBlocks[S.map + ":" + tx + ":" + ty] = 1;
+        AudioSys.sfx(ch === "R" ? "shatter" : "clang");
+        spawnParticles(tx * TILE + 8, ty * TILE + 8, 6, ch === "R" ? "#bfe9ff" : "#8a6f4d");
+      }
+    }
+    if (this.swing.t <= 0) { this.swing = null; this._swingRect = null; }
+  },
+
+  updateBullets(dt) {
+    this.bullets.forEach(b => {
+      b.x += b.vx * dt; b.y += b.vy * dt; b.t -= dt;
+      if (solidAt(b.x, b.y)) { b.t = 0; spawnParticles(b.x, b.y, 3, b.col); }
+      const p = this.player;
+      if (p.iFrames <= 0 && rectsOverlap({ x: b.x - 3, y: b.y - 3, w: 6, h: 6 }, { x: p.x, y: p.y, w: p.w, h: p.h })) {
+        b.t = 0; hurtPlayer(b.dmg, b);
+      }
+      if (this.boss && b.friendly && rectsOverlap({ x: b.x - 3, y: b.y - 3, w: 6, h: 6 }, this.boss) && this.boss.iHit <= 0) {
+        this.boss.hp -= b.dmg; this.boss.iHit = 0.3; b.t = 0;
+      }
+    });
+    this.bullets = this.bullets.filter(b => b.t > 0);
+  },
+
+  updatePickups(dt) {
+    const p = this.player;
+    this.pickups = this.pickups.filter(pk => {
+      if (rectsOverlap(pk, p)) {
+        if (pk.kind === "charbon") { S.keys += 1; AudioSys.sfx("pickup"); toast("+1 charbon (" + S.keys + ")"); }
+        if (pk.kind === "poutine") { S.hp = Math.min(S.maxHp, S.hp + 4); AudioSys.sfx("heart"); toast("Poutine! +4 cœurs"); }
+        S.takenKeys[pk.id] = 1; saveGame();
+        return false;
+      }
+      return true;
+    });
+  }
+};
+
+function spawnParticles(x, y, n, col) {
+  for (let i = 0; i < n; i++) {
+    const a = srand() * Math.PI * 2, s = 30 + srand() * 60;
+    Entities.particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, t: 0.3 + srand() * 0.3, col });
+  }
+}
+
+function swingRect(dir, px, py, pw, ph) {
+  const cx = px + pw / 2, cy = py + ph / 2;
+  const R = 20;
+  if (dir === "up") return { x: cx - 14, y: cy - R - 8, w: 28, h: 26 };
+  if (dir === "down") return { x: cx - 14, y: cy + 2, w: 28, h: 26 };
+  if (dir === "left") return { x: cx - R - 8, y: cy - 14, w: 22, h: 28 };
+  return { x: cx + 2, y: cy - 14, w: 22, h: 28 };
+}
+
+function hurtPlayer(dmg, src, silent) {
+  const p = Entities.player;
+  if (p.iFrames > 0) return;
+  S.hp -= dmg;
+  p.iFrames = 1.0;
+  if (!silent) AudioSys.sfx("hurt");
+  else AudioSys.sfx("sludge");
+  if (src) {
+    const ang = Math.atan2(p.y - src.y, p.x - src.x);
+    p.kbVx = Math.cos(ang) * 160; p.kbVy = Math.sin(ang) * 160; p.pushT = 0.18;
+  }
+  spawnParticles(p.x + 5, p.y + 6, 5, "#ff6b6b");
+  if (S.hp <= 0) die();
+}
+
+function die() {
+  S.deaths += 1;
+  AudioSys.sfx("die");
+  Game.setState("gameover");
+}
+
+// ---------- ENNEMIS ----------
+const ENEMY_DEFS = {
+  blob:    { hp: 3, spd: 34, w: 12, h: 10, dmg: 1, col: "#7fd4ff", name: "Glaçon vivant" },
+  wolf:    { hp: 4, spd: 62, w: 14, h: 10, dmg: 1, col: "#9fb3c8", name: "Loup-garrou de janvier" },
+  frigo:   { hp: 7, spd: 20, w: 14, h: 16, dmg: 2, col: "#d7ecff", name: "Frigidaire hanté" },
+  mardeux: { hp: 5, spd: 44, w: 12, h: 12, dmg: 1, col: "#5a6b4a", name: "Mardeux glacé" }
+};
+function makeEnemy(type, x, y) {
+  const d = ENEMY_DEFS[type];
+  return { type, x, y, w: d.w, h: d.h, hp: d.hp, spd: d.spd, dmg: d.dmg, col: d.col,
+    t: srand() * 6, kb: null, hitCd: 0, flash: 0, home: [x, y] };
+}
+function updateEnemy(e, dt, E) {
+  const d = ENEMY_DEFS[e.type];
+  e.t += dt;
+  if (e.flash > 0) e.flash -= dt;
+  if (e.hitCd > 0) e.hitCd -= dt;
+  // knockback
+  if (e.kb && e.kb.t > 0) {
+    e.kb.t -= dt;
+    moveWithCollision(e, e.kb.vx * dt, e.kb.vy * dt);
+    return;
+  }
+  const p = E.player;
+  const dd = dist(e.x, e.y, p.x, p.y);
+  let vx = 0, vy = 0;
+  if (dd < 130) {
+    // chase
+    const ang = Math.atan2(p.y - e.y, p.x - e.x);
+    vx = Math.cos(ang) * d.spd; vy = Math.sin(ang) * d.spd;
+    if (e.type === "wolf") { // zigzag
+      const per = Math.sin(e.t * 6) * 0.5;
+      const ca = ang + per;
+      vx = Math.cos(ca) * d.spd; vy = Math.sin(ca) * d.spd;
+    }
+    if (e.type === "frigo" && dd < 60 && e.t % 2 < dt * 2) {
+      E.bullets.push({ x: e.x + 7, y: e.y + 14, vx: Math.cos(ang) * 90, vy: Math.sin(ang) * 90, t: 2, dmg: 1, col: "#bfe8ff", kind: "ice" });
+      AudioSys.sfx("fireball");
+    }
+  } else {
+    // wander autour du home
+    vx = Math.cos(e.t * 0.8 + e.home[0]) * d.spd * 0.4;
+    vy = Math.sin(e.t * 0.6 + e.home[1]) * d.spd * 0.4;
+  }
+  moveWithCollision(e, vx * dt, vy * dt);
+  // contact damage
+  if (rectsOverlap(e, E.player) && E.player.iFrames <= 0) hurtPlayer(d.dmg, e);
+  // glace: les ennemis glissent aussi un peu
+  if (onIce(e)) { e.x += Math.cos(e.t) * 8 * dt; }
+}
+
+// ---------- BOSS ----------
+function makeBoss(kind) {
+  // L'Roi : supprime les blocs R de son arène (chicane intouchable) — il se déplace librement
+  const defs = {
+    frigor: { x: 20 * TILE, y: 17 * TILE, w: 26, h: 30, hp: 36, name: "MÉGA FRIGO-BOT", col: "#aee2ff",
+      intro: "LE FRIGO S'OUVRE. Y'EST FÂCHÉ pis y'gèle." },
+    sludger: { x: 19 * TILE, y: 17 * TILE, w: 28, h: 28, hp: 48, name: "SLUDGE-O-MATIC", col: "#4d5d3a",
+      intro: "LE SLUDGE MONTE. ÇA PUE LA BONBONNE BRÛLÉE." },
+    roi: { x: 19 * TILE, y: 17 * TILE, w: 24, h: 28, hp: 68, name: "L'ROI DU CHAUFFAGE", col: "#e8c56a",
+      intro: "« TOÉ. Le gars au poêlon. T'as pas ta place icitte. »" }
+  };
+  const d = defs[kind];
+  if (kind === "roi") {
+    // clean les blocs de glace autour du trône (le boss doit pouvoir charger)
+    const cx = Math.floor(d.x / TILE), cy = Math.floor(d.y / TILE);
+    for (let ty = cy - 2; ty <= cy + 2; ty++) for (let tx = cx - 3; tx <= cx + 3; tx++) {
+      if (g(tx, ty) === "R") setTile(tx, ty, ",");
+    }
+  }
+  return { kind, ...d, maxHp: d.hp, phase: 1, t: 0, iHit: 0, flash: 0, atkCd: 2, moveT: 0, introT: 2.2, dead: false };
+}
+
+function updateBoss(b, dt, E) {
+  // mort (vérifiée en premier: un boss à 0hp est mort, même pendant son intro)
+  if (b.hp <= 0 && !b.dead) {
+    b.dead = true;
+    E.bullets = [];
+    AudioSys.sfx("roar"); AudioSys.sfx("jingle");
+    onBossDefeated(b.kind);
+    return;
+  }
+  if (b.dead) return;
+  if (b.introT > 0) { b.introT -= dt; return; }
+  b.t += dt;
+  if (b.flash > 0) b.flash -= dt;
+  if (b.iHit > 0) b.iHit -= dt;
+  const p2 = b.hp <= b.maxHp * 0.5;
+  if (p2 && b.phase === 1) {
+    b.phase = 2; AudioSys.sfx("roar");
+    toast(b.kind === "roi" ? "« Y'FAIT FROID ICI! »" : "Il enrage!");
+  }
+  const spd = b.kind === "frigor" ? 30 : (b.kind === "sludger" ? 44 : 38);
+  const p = E.player;
+  const ang = Math.atan2(p.y - b.y, p.x - b.x);
+  // mouvement
+  b.moveT -= dt;
+  if (b.moveT <= 0) { b.moveT = 1.2 + srand(); b.mvx = Math.cos(ang) * spd; b.mvy = Math.sin(ang) * spd; }
+  moveWithCollision(b, b.mvx * dt, b.mvy * dt);
+  // attaques
+  b.atkCd -= dt;
+  if (b.atkCd <= 0) {
+    const n = b.phase === 2 ? 5 : 3;
+    if (b.kind === "frigor") {
+      for (let i = 0; i < n; i++) {
+        const a = ang + (i - (n - 1) / 2) * 0.28;
+        E.bullets.push({ x: b.x + b.w / 2, y: b.y + b.h, vx: Math.cos(a) * 110, vy: Math.sin(a) * 110, t: 2.4, dmg: 2, col: "#cfefff", kind: "ice" });
+      }
+      b.atkCd = b.phase === 2 ? 1.5 : 2.2;
+      AudioSys.sfx("fireball");
+    } else if (b.kind === "sludger") {
+      for (let i = 0; i < n; i++) {
+        const a = srand() * Math.PI * 2;
+        E.bullets.push({ x: b.x + b.w / 2, y: b.y + b.h / 2, vx: Math.cos(a) * 85, vy: Math.sin(a) * 85, t: 2.8, dmg: 3, col: "#7a8a4a", kind: "sludge" });
+      }
+      b.atkCd = b.phase === 2 ? 1.6 : 2.4;
+      AudioSys.sfx("sludge");
+    } else {
+      // L'Roi : charge + gerbe de flammes bleues (il crache le froid qu'il garde)
+      if (srand() < 0.5) {
+        b.kb = null; b.chargeT = 0.6; b.mvx = Math.cos(ang) * 150; b.mvy = Math.sin(ang) * 150;
+      } else {
+        for (let i = 0; i < n; i++) {
+          const a = ang + (i - (n - 1) / 2) * 0.22;
+          E.bullets.push({ x: b.x + b.w / 2, y: b.y + b.h / 2, vx: Math.cos(a) * 100, vy: Math.sin(a) * 100, t: 2.2, dmg: 5, col: "#ffb36b", kind: "spark" });
+        }
+        AudioSys.sfx("fireball");
+      }
+      b.atkCd = b.phase === 2 ? 1.4 : 2.0;
+    }
+  }
+  // contact
+  if (rectsOverlap(b, p) && p.iFrames <= 0) hurtPlayer(6, b);
+  // mort
+  if (b.hp <= 0 && !b.dead) {
+    b.dead = true;
+    E.bullets = [];
+    AudioSys.sfx("roar"); AudioSys.sfx("jingle");
+    onBossDefeated(b.kind);
+  }
+}
+
+function onBossDefeated(kind) {
+  // écrit les DEUX clés (kind réel + alias de porte) pour éviter tout mismatch
+  S.bossDefeated[kind] = true;
+  S.bossDefeated[{ frigor: "boss_dep", sludger: "boss_usine", roi: "boss_chateau" }[kind]] = true;
+  Game.bossJustDied = kind;
+  saveGame();
+}
+
+/* ==== 05_interact.js ==== */
+"use strict";
+/* ============================================================
+   INTERACT — dialogues, coffres, portes, poêle, journal
+   ============================================================ */
+
+const Dialog = {
+  active: false, lines: [], idx: 0, chars: 0, t: 0, speaker: "", onDone: null,
+  start(lines, speaker, onDone) {
+    this.lines = Array.isArray(lines) ? lines : [lines];
+    this.idx = 0; this.chars = 0; this.active = true; this.speaker = speaker || "";
+    this.onDone = onDone || null;
+    Game.setState("dialog");
+  },
+  update(dt) {
+    if (!this.active) return;
+    const line = this.lines[this.idx] || "";
+    if (this.chars < line.length) {
+      this.t += dt;
+      const speed = 0.018;
+      while (this.t > speed && this.chars < line.length) {
+        this.t -= speed; this.chars++;
+        if (this.chars % 3 === 0) AudioSys.sfx("blip");
+      }
+    }
+    if (keyPressed("interact") || keyPressed("swing")) {
+      if (this.chars < line.length) this.chars = line.length;
+      else {
+        this.idx++;
+        this.chars = 0;
+        if (this.idx >= this.lines.length) {
+          this.active = false;
+          Game.setState("play");
+          const cb = this.onDone; this.onDone = null;
+          if (cb) cb();
+        }
+      }
+    }
+  }
+};
+
+const Toast = {
+  msg: "", t: 0,
+  show(m) { this.msg = m; this.t = 2.2; },
+  update(dt) { if (this.t > 0) this.t -= dt; }
+};
+function toast(m) { Toast.show(m); }
+
+function facingTile(p) {
+  const cx = Math.floor((p.x + p.w / 2) / TILE), cy = Math.floor((p.y + p.h / 2) / TILE);
+  if (p.dir === "up") return [cx, cy - 1];
+  if (p.dir === "down") return [cx, cy + 1];
+  if (p.dir === "left") return [cx - 1, cy];
+  return [cx + 1, cy];
+}
+
+function tryInteract() {
+  const p = Entities.player;
+  const [fx, fy] = facingTile(p);
+  const ch = g(fx, fy);
+
+  // NPC devant (rayon 20px du point devant)
+  const fpx = fx * TILE + 8, fpy = fy * TILE + 8;
+  let npc = null;
+  if (S.map === "overworld" && MAP.npcPos) {
+    Object.entries(MAP.npcPos).forEach(([id, pos]) => {
+      const def = ALL_NPCS.find(n => n.id === id);
+      if (!def) return;
+      const nx = pos[0] * TILE + 8, ny = pos[1] * TILE + 8;
+      if (dist(fpx, fpy, nx, ny) < 22) npc = def;
+    });
+  }
+  if (npc) { Dialog.start(npc.lines, npc.name); return; }
+
+  // affiche (registre dynamique)
+  if (ch === "^" && MAP.signRegistry) {
+    const txt = MAP.signRegistry[fx + "," + fy];
+    if (txt) { Dialog.start(txt.split("\n"), "Affiche"); return; }
+  }
+
+  // poêle commun
+  if (ch === "S") { stoveInteract(); return; }
+
+  // coffre
+  if (ch === "C") { openChest(fx, fy); return; }
+
+  // porte de donjon
+  if (ch === "D") { doorInteract(fx, fy); return; }
+
+  // porte verrouillée (donjon)
+  if (ch === "d") { lockedDoorInteract(fx, fy); return; }
+}
+
+function stoveInteract() {
+  if (S.stovesLit.place) { Dialog.start(["Le poêle de la place crépite doucement.", "Le village s'est assis autour. Même Plate, pis y'est plate."], "Poêle commun"); return; }
+  if (S.frags >= 6) {
+    Dialog.start([
+      "Tu approches le poêlon. Les six souvenirs chauffent ton poing.",
+      "T'as plus besoin de la flamme de personne. T'as la tienne.",
+      "Le charbon prend. La flamme monte. Elle est petite. Elle est à nous."
+    ], "Poêle commun", () => {
+      S.stovesLit.place = true;
+      saveGame();
+      startEnding();
+    });
+  } else {
+    Dialog.start([
+      "Le poêle est froid. Y'a pu de charbon, y'a pu de flamme.",
+      "Mémère disait : « La flamme, ça se donne. » Y'a six souvenirs dehors, dans le froid.",
+      "Trouve-les tous (" + S.frags + "/6) pis reviens."
+    ], "Poêle commun");
+  }
+}
+
+function openChest(fx, fy) {
+  const key = S.map + ":" + fx + ":" + fy;
+  if (S.openedChests[key]) { toast("Coffre à vide."); return; }
+  S.openedChests[key] = 1;
+
+  // coffres de donjon (registre buildDungeon)
+  if (S.map !== "overworld" && MAP.chests) {
+    const item = MAP.chests[fx + "," + fy];
+    if (item === "coeur_max") {
+      S.maxHp += 4; S.hp = S.maxHp;
+      AudioSys.sfx("chest");
+      Dialog.start(["Une boîte de conserve géante en fonte (???).", "MAX CŒURS! T'en as " + S.maxHp + " à c't'heure."], "Coffre");
+    } else if (item === "dmg_up") {
+      S.dmg += 1;
+      AudioSys.sfx("chest");
+      Dialog.start(["Un poêlon en fonte plus lourd. Y'a marqué « LÉO » dessous.", "DÉGÂTS +1. Y'va le sentir passer."], "Coffre");
+    }
+    saveGame();
+    return;
+  }
+
+  // coffres du monde (registre genOverworld) — frag ou charbon bonus
+  if (S.map === "overworld" && MAP.chestRegistry) {
+    const fragId = MAP.chestRegistry[fx + "," + fy];
+    if (fragId !== undefined) { saveGame(); giveFragment(fragId); return; }
+    // coffre sans fragment: charbon de qualité
+    S.keys += 3;
+    AudioSys.sfx("chest");
+    Dialog.start(["Du charbon de la cookère à Onésime, gardé au sec.", "+3 charbon."], "Coffre");
+    saveGame();
+    return;
+  }
+
+  // fallback: charbon
+  S.keys += 2;
+  AudioSys.sfx("chest");
+  Dialog.start(["Du charbon congelé de qualité supérieure.", "+2 charbon."], "Coffre");
+  saveGame();
+}
+
+function giveFragment(id) {
+  if (!S.flags["frag" + id]) {
+    S.flags["frag" + id] = 1;
+    S.frags += 1;
+  }
+  AudioSys.sfx("jingle");
+  Game.fragmentShown = FRAGS[id];
+  Game.setState("fragment");
+  saveGame();
+}
+
+function doorInteract(fx, fy) {
+  let target = null;
+  for (const [id, d] of Object.entries(DUNGEON_DOORS)) {
+    if (d.x === fx && d.y === fy) target = id;
+  }
+  if (!target) return;
+  const dd = DUNGEON_DOORS[target];
+  if (dd.need && !S.bossDefeated[dd.need]) {
+    Dialog.start([
+      dd.label + " — barré par les hommes de L'Roi.",
+      target === "usine" ? "« Pas de flamme pour les curieux. » — L'Roi" : "« La tour, c'est pour le mérite. Toé t'en as pas. »",
+      "Faut d'abord cleaner l'donjon précédent."
+    ], "Affiche");
+    return;
+  }
+  Game.pendingDungeon = target;
+  Game.setState("confirmdoor");
+}
+
+function lockedDoorInteract(fx, fy) {
+  if (S.keys >= 1) {
+    S.keys -= 1;
+    const k = "d:" + fx + ":" + fy;
+    setTile(fx, fy, floorCh(S.map));
+    S.unlockedDoors = S.unlockedDoors || {};
+    S.unlockedDoors[S.map + ":" + fx + ":" + fy] = 1;
+    AudioSys.sfx("door");
+    toast("Porte déverrouillée (-1 charbon)");
+    saveGame();
+  } else {
+    Dialog.start(["Verrouillé. Les poêles de secours du bâtiment mangent du charbon.", "Y'faut au moins 1 charbon pour l'ouvrir."], "");
+  }
+}
+
+// Sortie de donjon: tuile E
+function checkExits() {
+  if (S.map === "overworld" || Game.exitCd > 0) return;
+  const p = Entities.player;
+  const tx = Math.floor((p.x + p.w / 2) / TILE), ty = Math.floor((p.y + p.h / 2) / TILE);
+  if (g(tx, ty) === "E") {
+    const door = DUNGEON_DOORS[S.map];
+    AudioSys.sfx("door");
+    enterMap("overworld", { x: door.x, y: door.y + 1 });
+  }
+}
+
+// ---------- JOURNAL ----------
+const Journal = {
+  toggle() {
+    if (Game.state === "play") Game.setState("journal");
+    else if (Game.state === "journal") Game.setState("play");
+  }
+};
+
+// ---------- NPCS runtime (positions lues dans MAP.npcPos) ----------
+const ALL_NPCS = [
+  { id: "fortin", name: "La Veuve Fortin", lines: [
+    "Ti-Coq! T'as l'air d'un homard dans un frigidaire, mon garçon.",
+    "Trente ans que j'habite en haut de la dépanneuse. Le frigo, là-bas... y'gèle de l'intérieur depuis la Grande Froideur. J'entends les porteoli grincer la nuit.",
+    "Si t'y vas... pense au charbon du vieux poêle. Ça s'mange pas, ça s'brûle. Comme les mots de mon défunt. Sauf que ça, ça réchauffe."
+  ] },
+  { id: "ghislain", name: "Ghislain Pâquette", lines: [
+    "La pêche blanche, mon Ti-Coq! Le lac est gelé comme un chèque de pension.",
+    "Le secret : c'est pas le poisson qu'y faut forcer. C'est d'être là, tranquille, avec la bonne miette. Pareil pour la flamme. Pareil pour tout, d'ailleurs.",
+    "Le charbon? J'en mets dans mes bottes. Contre le froid. Ne demande pas."
+  ] },
+  { id: "plate", name: "Le Gars Plate", lines: [
+    "Ch'us plate. Ch'us gelé. La dépanneuse est hantée par un frigo qui pense.",
+    "Un poêlon comme arme! Ouain. C'est mieux qu'un couteau. Ça frappe pis ça fait frire. Multitâche, ça.",
+    "Le charbon du vieux poêle de la place... c'est ça qui t'allumera la route. Ramasse-en quand tu peux."
+  ] },
+  { id: "sansregret", name: "Docteure Sansregret", lines: [
+    "Le froid r'garde qui vacille, Ti-Coq. Mange, dors, pis swingue fort.",
+    "Une poutine par cœur, la science est claire là-dessus. Une poutine par cœur.",
+    "Le charbon? J'en garde sous ma caisse depuis la fin du monde. C'est... c'est maintenant, là, je pense."
+  ] },
+  { id: "onesime", name: "Le Vieil Onésime", lines: [
+    "L'Roi du Chauffage... j'l'ai connu quand y'livrait du mazout en vélo.",
+    "Y'a mis la flamme en cage parce qu'y'avait peur qu'elle meure. C'est ça, le trouble avec la peur : elle garde tout pis elle donne rien.",
+    "Prends le charbon de ma cookère, mon garçon. Moé j'ai pus d'souffle pour l'allumer de toute façon."
+  ] }
+];
+
+/* ==== 06_render_atlas.js ==== */
+"use strict";
+/* ============================================================
+   RENDER A — atlas de tuiles pixel-art procédural
+   ============================================================ */
+
+const Renderer = {
+  canvas: null, ctx: null,
+  atlas: null, imgCache: {},
+
+  init() {
+    this.canvas = document.getElementById("game");
+    this.canvas.width = VIEW_W * SCALE; this.canvas.height = VIEW_H * SCALE;
+    this.ctx = this.canvas.getContext("2d");
+    this.ctx.imageSmoothingEnabled = false;
+    this.buildAtlas();
+    this.loadImages();
+  },
+
+  loadImages() {
+    ["title", "intro1", "intro2", "intro3", "intro4", "dungeon_dep", "dungeon_usine",
+     "dungeon_chateau", "boss_roi", "ti_coq", "ending"].forEach(n => {
+      const img = new Image();
+      img.src = "assets/" + n + ".png";
+      this.imgCache[n] = img;
+    });
+  },
+
+  img(n) { const i = this.imgCache[n]; return i && i.complete && i.naturalWidth > 0 ? i : null; },
+
+  buildAtlas() {
+    const c = document.createElement("canvas");
+    c.width = 16 * 24; c.height = 16;
+    const a = c.getContext("2d");
+    const T = (i, fn) => { a.save(); a.translate(i * 16, 0); fn(a); a.restore(); };
+    const noise = (i, col, density, seed) => {
+      let s = seed || 1;
+      a.fillStyle = col;
+      for (let n = 0; n < density; n++) {
+        s = (s * 1103515245 + 12345) & 0x7fffffff;
+        a.fillRect(i * 16 + (s >> 8) % 16, (s >> 16) % 16, 1, 1);
+      }
+    };
+    const snow = (i) => { a.fillStyle = "#dce7f2"; a.fillRect(i * 16, 0, 16, 16); };
+
+    // 0 mur/forêt
+    T(0, () => {
+      a.fillStyle = "#1d3a2a"; a.fillRect(0, 0, 16, 16);
+      a.fillStyle = "#0f2418"; a.fillRect(0, 0, 16, 2); a.fillRect(0, 5, 16, 2); a.fillRect(0, 10, 16, 2); a.fillRect(0, 15, 16, 1);
+      noise(0, "#2d5a3f", 10, 11); noise(0, "#142e20", 8, 12);
+    });
+    // 1 neige
+    T(1, () => { a.fillStyle = "#dce7f2"; a.fillRect(0, 0, 16, 16); noise(1, "#c3d4e4", 14, 21); noise(1, "#f0f6fb", 10, 22); });
+    // 2 chemin
+    T(2, () => { a.fillStyle = "#b8c4cf"; a.fillRect(0, 0, 16, 16); noise(2, "#a3aeb9", 10, 31); noise(2, "#cdd8e2", 8, 32); });
+    // 3 glace
+    T(3, () => { a.fillStyle = "#bcd9f0"; a.fillRect(0, 0, 16, 16); noise(3, "#a8c8e8", 8, 41); noise(3, "#d4ecff", 12, 42); a.strokeStyle = "#9fc0dd"; a.beginPath(); a.moveTo(0, 6); a.lineTo(16, 10); a.stroke(); });
+    // 4 glace craquée
+    T(4, () => {
+      a.fillStyle = "#8fb4d4"; a.fillRect(0, 0, 16, 16);
+      a.strokeStyle = "#5a7d9e"; a.beginPath(); a.moveTo(2, 1); a.lineTo(9, 7); a.lineTo(5, 14); a.stroke();
+      a.beginPath(); a.moveTo(13, 2); a.lineTo(10, 9); a.stroke();
+    });
+    // 5 mur maison
+    T(5, () => {
+      a.fillStyle = "#5d4a38"; a.fillRect(0, 0, 16, 16);
+      a.fillStyle = "#4a3a2c"; a.fillRect(0, 0, 16, 3); a.fillRect(0, 8, 16, 2); a.fillRect(0, 13, 16, 2);
+      a.fillStyle = "#6d5844"; a.fillRect(3, 3, 4, 4); a.fillRect(10, 5, 4, 3);
+    });
+    // 6 toit
+    T(6, () => {
+      a.fillStyle = "#7a3f34"; a.fillRect(0, 0, 16, 16);
+      a.fillStyle = "#65342b"; a.fillRect(0, 4, 16, 2); a.fillRect(0, 10, 16, 2);
+      a.fillStyle = "#8a4a3e"; a.fillRect(2, 2, 12, 1);
+    });
+    // 7 porte maison
+    T(7, () => { a.fillStyle = "#5d4a38"; a.fillRect(0, 0, 16, 16); a.fillStyle = "#2b1f16"; a.fillRect(3, 2, 10, 14); a.fillStyle = "#c9a227"; a.fillRect(10, 9, 2, 2); });
+    // 8 fenêtre
+    T(8, () => { a.fillStyle = "#5d4a38"; a.fillRect(0, 0, 16, 16); a.fillStyle = "#a8d4e8"; a.fillRect(3, 3, 10, 8); a.strokeStyle = "#3a2c20"; a.strokeRect(3, 3, 10, 8); a.beginPath(); a.moveTo(8, 3); a.lineTo(8, 11); a.stroke(); });
+    // 9 lampadaire
+    T(9, () => {
+      snow(9);
+      a.fillStyle = "#2e3440"; a.fillRect(7, 4, 2, 12);
+      a.fillStyle = "#ffd27f"; a.fillRect(5, 0, 6, 4);
+      a.fillStyle = "#fff3d0"; a.fillRect(6, 1, 4, 2);
+    });
+    // 10 baril
+    T(10, () => {
+      snow(10);
+      a.fillStyle = "#6b4a2f"; a.fillRect(1, 1, 14, 14);
+      a.fillStyle = "#7d583a"; a.fillRect(1, 3, 14, 2); a.fillRect(1, 10, 14, 2);
+      a.fillStyle = "#4d3420"; a.fillRect(1, 1, 14, 1); a.fillRect(1, 14, 14, 1);
+    });
+    // 11 poêle
+    T(11, () => {
+      snow(11);
+      a.fillStyle = "#1a1a1a"; a.fillRect(2, 2, 12, 13);
+      a.fillStyle = "#3a3a3a"; a.fillRect(3, 3, 10, 3);
+      a.fillStyle = "#5c5c5c"; a.fillRect(12, 5, 2, 8);
+      a.fillStyle = "#111"; a.fillRect(4, 7, 8, 7);
+    });
+    // 12 bloc de glace cassable
+    T(12, () => {
+      snow(12);
+      a.fillStyle = "#cde9fb"; a.fillRect(0, 0, 16, 16);
+      a.fillStyle = "#eaf6ff"; a.fillRect(2, 2, 12, 6);
+      a.strokeStyle = "#8fbcd9"; a.strokeRect(1, 1, 14, 14);
+      a.fillStyle = "#ffffff"; a.fillRect(3, 9, 3, 2); a.fillRect(9, 4, 2, 2);
+    });
+    // 13 affiche
+    T(13, () => {
+      snow(13);
+      a.fillStyle = "#8a6f4d"; a.fillRect(6, 6, 2, 10);
+      a.fillStyle = "#c9b58f"; a.fillRect(2, 1, 12, 7);
+      a.strokeStyle = "#6d5836"; a.strokeRect(2, 1, 12, 7);
+      a.fillStyle = "#5d4b30"; a.fillRect(4, 3, 8, 1); a.fillRect(4, 5, 6, 1);
+    });
+    // 14 vide
+    T(14, () => { a.fillStyle = "#dce7f2"; a.fillRect(0, 0, 16, 16); });
+    // 15 charbon
+    T(15, () => {
+      snow(15);
+      a.fillStyle = "#222"; a.fillRect(5, 7, 6, 5);
+      a.fillStyle = "#444"; a.fillRect(5, 7, 6, 2);
+      a.fillStyle = "#111"; a.fillRect(6, 10, 4, 2);
+    });
+    // 16 poutine
+    T(16, () => {
+      snow(16);
+      a.fillStyle = "#b3542e"; a.fillRect(4, 8, 8, 5);
+      a.fillStyle = "#d98c3f"; a.fillRect(4, 6, 8, 3);
+      a.fillStyle = "#f0e2c0"; a.fillRect(5, 5, 6, 2);
+      a.fillStyle = "#7a5230"; a.fillRect(4, 12, 8, 1);
+    });
+    // 17 coffre fermé
+    T(17, () => {
+      snow(17);
+      a.fillStyle = "#8a6f4d"; a.fillRect(2, 3, 12, 10);
+      a.fillStyle = "#a3875f"; a.fillRect(2, 3, 12, 4);
+      a.fillStyle = "#6d5836"; a.fillRect(2, 12, 12, 1);
+      a.fillStyle = "#c9a227"; a.fillRect(7, 6, 2, 3);
+    });
+    // 18 coffre ouvert
+    T(18, () => {
+      snow(18);
+      a.fillStyle = "#8a6f4d"; a.fillRect(2, 3, 12, 10);
+      a.fillStyle = "#2b1f16"; a.fillRect(4, 5, 8, 6);
+      a.fillStyle = "#6d5836"; a.fillRect(2, 12, 12, 1);
+    });
+    // 19 porte donjon
+    T(19, () => {
+      a.fillStyle = "#5d4a38"; a.fillRect(0, 0, 16, 16);
+      a.fillStyle = "#23180f"; a.fillRect(2, 2, 12, 14);
+      a.fillStyle = "#c9a227"; a.fillRect(7, 8, 2, 3);
+      a.fillStyle = "#4d3a28"; a.fillRect(2, 2, 12, 2);
+    });
+    // 20 porte verrouillée
+    T(20, () => {
+      a.fillStyle = "#3a2c20"; a.fillRect(0, 0, 16, 16);
+      a.fillStyle = "#23180f"; a.fillRect(2, 2, 12, 14);
+      a.fillStyle = "#888888"; a.fillRect(6, 7, 4, 2); a.fillRect(7, 9, 2, 3);
+    });
+    // 21 sludge
+    T(21, () => {
+      a.fillStyle = "#3d4a2e"; a.fillRect(0, 0, 16, 16);
+      a.fillStyle = "#2e3a22"; a.fillRect(1, 1, 14, 14);
+      a.fillStyle = "#54683a"; a.fillRect(3, 2, 5, 2); a.fillRect(9, 9, 4, 2);
+      a.fillStyle = "#6d8a4a"; a.fillRect(5, 11, 3, 1);
+    });
+    // 22 sortie
+    T(22, () => {
+      a.fillStyle = "#3a3f4a"; a.fillRect(0, 0, 16, 16);
+      a.fillStyle = "#565d6d"; a.fillRect(2, 2, 12, 12);
+      a.fillStyle = "#2b2f38"; a.fillRect(4, 4, 8, 8);
+    });
+    // 23 sol donjon générique
+    T(23, () => { a.fillStyle = "#4a4550"; a.fillRect(0, 0, 16, 16); noise(23, "#3d3843", 9, 71); });
+
+    this.atlas = c;
+  }
+};
+
+// index d'atlas par caractère (theme overworld/donjon)
+function tileIndex(ch, theme) {
+  switch (ch) {
+    case "#": return theme === "barrel" ? 10 : (theme === "ice" ? 4 : (theme === "sludge" ? 21 : 0));
+    case ".": return 1;
+    case ",": return 2;
+    case "~": return 3;
+    case "x": return 4;
+    case "T": return 5;
+    case "H": return 6;
+    case "o": return 7;
+    case "W": return 8;
+    case "L": return 9;
+    case "B": return 10;
+    case "S": return 11;
+    case "R": return theme === "ice" ? 12 : (theme === "barrel" ? 10 : 12);
+    case "k": return 15; // clé = charbon visuel (la "clé" du design c'est le charbon)
+    case "^": return 13;
+    case "c": return 15;
+    case "q": return 16;
+    case "C": return 17;
+    case "D": return 19;
+    case "d": return 20;
+    case "p": return 21;
+    case "E": return 22;
+    default: return 23;
+  }
+}
+
+/* ==== 07_render_frame.js ==== */
+"use strict";
+/* ============================================================
+   RENDER B — frame rendering (monde, entities, HUD, states)
+   Tout l'UI est dessiné en espace design 320x240 (scalé x3).
+   ============================================================ */
+
+function renderFrame(dt) {
+  const ctx = Renderer.ctx;
+  // clear en espace design APRÈS scale — couvre tout le canvas
+  ctx.fillStyle = "#0a0e14";
+  ctx.save();
+  ctx.scale(SCALE, SCALE);
+  ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  ctx.restore();
+
+  const st = Game.state;
+  if (st === "title") { drawTitle(ctx); return; }
+  if (st === "intro") { drawIntro(ctx); return; }
+  if (st === "gameover") { drawGameOver(ctx); return; }
+  if (st === "ending") { drawEnding(ctx); return; }
+  if (!MAP) return;
+
+  // ---- monde (design space 320x240, caméra translate, SCALE ×3) ----
+  const p = Entities.player;
+  if (p) {
+    camera.x = clamp(p.x + p.w / 2 - VIEW_W / 2, 0, MAP.w * TILE - VIEW_W);
+    camera.y = clamp(p.y + p.h / 2 - VIEW_H / 2, 0, MAP.h * TILE - VIEW_H);
+  }
+  ctx.save();
+  ctx.scale(SCALE, SCALE);
+  ctx.translate(-Math.round(camera.x), -Math.round(camera.y));
+
+  const theme = S.map === "overworld" ? "snow"
+    : (MAP.theme === "dep" ? "ice" : MAP.theme === "usine" ? "sludge" : MAP.theme === "chateau" ? "barrel" : "snow");
+  const x0 = Math.floor(camera.x / TILE), y0 = Math.floor(camera.y / TILE);
+  const x1 = Math.min(MAP.w - 1, Math.ceil((camera.x + VIEW_W) / TILE));
+  const y1 = Math.min(MAP.h - 1, Math.ceil((camera.y + VIEW_H) / TILE));
+  for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) {
+    const ch = g(tx, ty);
+    const idx = tileIndex(ch, theme);
+    const sx = tx * TILE, sy = ty * TILE;
+    ctx.drawImage(Renderer.atlas, idx * 16, 0, 16, 16, sx, sy, 16, 16);
+    if (ch === "o" && S.map === "overworld") warmDoorGlow(ctx, sx, sy);
+    if (ch === "S" && S.stovesLit.place) stoveFlames(ctx, sx, sy);
+    if (ch === "C") drawChestOpenOverlay(ctx, tx, ty, sx, sy);
+  }
+
+  // poêle commun allumé : halo
+  if (S.map === "overworld" && S.stovesLit.place) {
+    const sx0 = 18 * TILE + 8, sy0 = 13 * TILE + 8;
+    const grad = ctx.createRadialGradient(sx0, sy0, 4, sx0, sy0, 120);
+    grad.addColorStop(0, "rgba(255,180,80,0.30)");
+    grad.addColorStop(1, "rgba(255,180,80,0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(sx0 - 120, sy0 - 120, 240, 240);
+  }
+
+  // pickups
+  Entities.pickups.forEach(pk => {
+    ctx.save();
+    ctx.translate(pk.x + 5, pk.y + 5 + Math.sin(performance.now() / 300 + pk.x) * 1.5);
+    if (pk.kind === "charbon") {
+      ctx.fillStyle = "#222"; ctx.fillRect(-4, -2, 8, 6);
+      ctx.fillStyle = "#454545"; ctx.fillRect(-4, -2, 8, 2);
+    } else {
+      ctx.fillStyle = "#b3542e"; ctx.fillRect(-5, 0, 10, 5);
+      ctx.fillStyle = "#d98c3f"; ctx.fillRect(-5, -2, 10, 3);
+      ctx.fillStyle = "#f0e2c0"; ctx.fillRect(-4, -4, 8, 2);
+    }
+    ctx.restore();
+  });
+
+  // ennemis / boss / bullets / joueur / swing / particules
+  Entities.enemies.forEach(e => drawEnemy(ctx, e));
+  if (Entities.boss) drawBoss(ctx, Entities.boss);
+  Entities.bullets.forEach(b => {
+    ctx.fillStyle = b.col;
+    ctx.beginPath(); ctx.arc(b.x, b.y, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.4)";
+    ctx.beginPath(); ctx.arc(b.x - 1, b.y - 1, 1.4, 0, Math.PI * 2); ctx.fill();
+  });
+  if (p) drawPlayer(ctx, p);
+  if (Entities.swing) drawSwing(ctx, Entities.swing);
+  Entities.particles.forEach(pt => {
+    ctx.fillStyle = pt.col;
+    ctx.fillRect(pt.x - 1, pt.y - 1, 2, 2);
+  });
+
+  ctx.restore(); // fin monde
+
+  // ---- UI (design space, fixe à l'écran) ----
+  ctx.save();
+  ctx.scale(SCALE, SCALE);
+  drawHUD(ctx);
+  if (Dialog.active) drawDialog(ctx);
+  if (Toast.t > 0) drawToast(ctx);
+  if (Game.state === "journal") drawJournal(ctx);
+  if (Game.state === "fragment") drawFragment(ctx);
+  if (Game.state === "confirmdoor") drawConfirmDoor(ctx);
+  drawColdVignette(ctx);
+  ctx.restore();
+}
+
+// ---------- joueur : pixel Ti-Coq ----------
+function drawPlayer(ctx, p) {
+  if (p.iFrames > 0 && Math.floor(p.iFrames * 12) % 2 === 0) return;
+  const bx = Math.round(p.x - 2), by = Math.round(p.y - 3);
+  ctx.save();
+  ctx.translate(bx, by);
+  const step = p.moving ? Math.floor(p.step) % 2 : 0;
+  ctx.fillStyle = "#3a4a5c";
+  if (step === 0) { ctx.fillRect(3, 12, 3, 3); ctx.fillRect(8, 12, 3, 3); }
+  else { ctx.fillRect(4, 12, 3, 3); ctx.fillRect(7, 12, 3, 3); }
+  ctx.fillStyle = "#8a3a2e";
+  ctx.fillRect(2, 6, 10, 7);
+  ctx.fillStyle = "#a84a3e"; ctx.fillRect(2, 6, 10, 2);
+  ctx.fillStyle = "#e8b88a";
+  ctx.fillRect(3, 1, 8, 6);
+  ctx.fillStyle = "#e86a1f";
+  ctx.fillRect(2, 0, 10, 4);
+  ctx.fillStyle = "#c9530f";
+  ctx.fillRect(2, 2, 10, 2);
+  ctx.fillStyle = "#222";
+  if (p.dir === "down") { ctx.fillRect(4, 3, 2, 2); ctx.fillRect(8, 3, 2, 2); }
+  else if (p.dir === "left") { ctx.fillRect(2, 3, 2, 2); }
+  else if (p.dir === "right") { ctx.fillRect(10, 3, 2, 2); }
+  ctx.fillStyle = "#1a1a1a";
+  if (p.dir === "right") { ctx.fillRect(12, 7, 6, 2); ctx.fillRect(15, 5, 3, 4); }
+  else if (p.dir === "left") { ctx.fillRect(-4, 7, 6, 2); ctx.fillRect(-6, 5, 3, 4); }
+  else if (p.dir === "up") { ctx.fillRect(11, 1, 2, 5); ctx.fillRect(10, -1, 4, 3); }
+  else { ctx.fillRect(2, 13, 6, 2); ctx.fillRect(3, 15, 4, 2); }
+  ctx.restore();
+}
+
+function drawSwing(ctx, s) {
+  const p = Entities.player;
+  const r = Entities._swingRect;
+  if (!r) return;
+  const prog = 1 - (s.t / 0.18);
+  ctx.save();
+  ctx.translate(p.x + p.w / 2, p.y + p.h / 2);
+  const base = { up: -Math.PI / 2, down: Math.PI / 2, left: Math.PI, right: 0 }[p.dir];
+  const spread = 1.9;
+  const a = base - spread / 2 + spread * prog;
+  ctx.strokeStyle = "#e8e8e8";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(0, 0, 16, a - 0.4, a + 0.4);
+  ctx.stroke();
+  ctx.fillStyle = "#1a1a1a";
+  ctx.rotate(a + Math.PI / 2);
+  ctx.fillRect(-2, -20, 4, 9);
+  ctx.fillRect(-5, -27, 10, 8);
+  ctx.restore();
+}
+
+function drawEnemy(ctx, e) {
+  const bx = Math.round(e.x), by = Math.round(e.y);
+  ctx.save();
+  if (e.flash > 0) ctx.globalAlpha = 0.6;
+  if (e.type === "blob") {
+    ctx.fillStyle = e.col;
+    ctx.beginPath(); ctx.arc(bx + 6, by + 5 + Math.sin(e.t * 4) * 1, 6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#0a2030"; ctx.fillRect(bx + 3, by + 3, 2, 2); ctx.fillRect(bx + 7, by + 3, 2, 2);
+  } else if (e.type === "wolf") {
+    ctx.fillStyle = e.col;
+    ctx.fillRect(bx, by + 3, 14, 6);
+    ctx.fillRect(bx + (Math.cos(e.t) > 0 ? 11 : -2), by, 5, 5);
+    ctx.fillStyle = "#ffd27f"; ctx.fillRect(bx + (Math.cos(e.t) > 0 ? 13 : -1), by + 2, 1, 1);
+    ctx.fillStyle = "#3a4a5c"; ctx.fillRect(bx + 2, by + 9, 2, 2); ctx.fillRect(bx + 9, by + 9, 2, 2);
+  } else if (e.type === "frigo") {
+    ctx.fillStyle = "#d7ecff"; ctx.fillRect(bx, by, 14, 16);
+    ctx.fillStyle = "#a8c8e8"; ctx.fillRect(bx + 1, by + 1, 12, 4);
+    ctx.fillStyle = "#ff4444"; ctx.fillRect(bx + 3, by + 6, 3, 3); ctx.fillRect(bx + 8, by + 6, 3, 3);
+    ctx.fillStyle = "#7d9dbd"; ctx.fillRect(bx + 1, by + 10, 12, 1);
+    ctx.fillStyle = "#555555"; ctx.fillRect(bx + 12, by + 8, 2, 4);
+  } else {
+    ctx.fillStyle = e.col; ctx.fillRect(bx + 1, by + 2, 10, 9);
+    ctx.fillStyle = "#2e3a22"; ctx.fillRect(bx + 2, by + 4, 3, 2); ctx.fillRect(bx + 7, by + 4, 3, 2);
+    ctx.fillStyle = "#c9d94a"; ctx.fillRect(bx + 3, by + 8, 6, 1);
+  }
+  if (e.flash > 0) { ctx.globalAlpha = 1; ctx.fillStyle = "#ffffff"; ctx.fillRect(bx, by, e.w, e.h); }
+  ctx.restore();
+}
+
+function drawBoss(ctx, b) {
+  const bx = Math.round(b.x), by = Math.round(b.y);
+  ctx.save();
+  if (b.flash > 0) ctx.globalAlpha = 0.7;
+  if (b.kind === "frigor") {
+    ctx.fillStyle = "#d7ecff"; ctx.fillRect(bx, by, b.w, b.h);
+    ctx.fillStyle = "#a8c8e8"; ctx.fillRect(bx + 2, by + 2, b.w - 4, 10);
+    ctx.fillStyle = "#ff4444"; ctx.fillRect(bx + 4, by + 13, 5, 5); ctx.fillRect(bx + b.w - 9, by + 13, 5, 5);
+    ctx.fillStyle = "#7d9dbd"; ctx.fillRect(bx + 2, by + 20, b.w - 4, 2);
+    ctx.fillStyle = "#555566"; ctx.fillRect(bx + b.w - 3, by + 12, 3, 10);
+  } else if (b.kind === "sludger") {
+    ctx.fillStyle = "#4d5d3a"; ctx.beginPath(); ctx.arc(bx + b.w / 2, by + b.h / 2, b.w / 2 + Math.sin(b.t * 3) * 2, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#6d8a4a"; ctx.fillRect(bx + 5, by + 5, b.w - 10, 4);
+    ctx.fillStyle = "#ffcc44"; ctx.fillRect(bx + 6, by + 12, 5, 4); ctx.fillRect(bx + b.w - 11, by + 12, 5, 4);
+    ctx.fillStyle = "#2e3a22"; ctx.fillRect(bx + 8, by + 20, 6, 2); ctx.fillRect(bx + b.w - 12, by + 20, 6, 2);
+  } else {
+    ctx.fillStyle = "#e8c56a"; ctx.fillRect(bx, by + 4, b.w, b.h - 4);
+    ctx.fillStyle = "#c9a227"; ctx.fillRect(bx + 2, by + 8, b.w - 4, 3);
+    ctx.fillStyle = "#e8b88a"; ctx.fillRect(bx + 4, by, b.w - 8, 8);
+    ctx.fillStyle = "#8a6f4d";
+    ctx.fillRect(bx + 2, by - 3, 4, 4); ctx.fillRect(bx + 8, by - 5, 4, 6); ctx.fillRect(bx + 14, by - 3, 4, 4);
+    ctx.fillStyle = b.phase === 2 ? "#ff2222" : "#222222";
+    ctx.fillRect(bx + 6, by + 3, 3, 2); ctx.fillRect(bx + b.w - 9, by + 3, 3, 2);
+    ctx.fillStyle = "#555555"; ctx.fillRect(bx + b.w - 2, by + 14, 5, 8);
+    if (b.phase === 1) { ctx.fillStyle = "#ffb36b"; ctx.fillRect(bx + b.w, by + 17, 3, 3); }
+  }
+  if (b.flash > 0) { ctx.globalAlpha = 1; ctx.fillStyle = "#ffffff"; ctx.fillRect(bx, by, b.w, b.h); }
+  ctx.restore();
+}
+
+// ---------- HUD (design space 320x240) ----------
+function drawHUD(ctx) {
+  // cœurs
+  const hearts = Math.ceil(S.maxHp / 4);
+  for (let h = 0; h < hearts; h++) {
+    const filled = clamp(S.hp - h * 4, 0, 4);
+    drawHeart(ctx, 8 + h * 14, 8, filled / 4);
+  }
+  // charbon
+  ctx.fillStyle = "#222222"; ctx.fillRect(VIEW_W - 106, 7, 10, 8);
+  ctx.fillStyle = "#e8e8e8"; ctx.font = "8px monospace";
+  ctx.fillText("x " + S.keys, VIEW_W - 92, 14);
+  // fragments
+  for (let i = 0; i < 6; i++) {
+    ctx.globalAlpha = i < S.frags ? 1 : 0.25;
+    ctx.fillStyle = "#ffb36b";
+    ctx.fillRect(VIEW_W - 66 + i * 10, 8, 6, 6);
+  }
+  ctx.globalAlpha = 1;
+  // timer
+  ctx.fillStyle = "#cdd8e2"; ctx.font = "8px monospace";
+  ctx.fillText(fmtTime(S.playtime), VIEW_W - 32, VIEW_H - 5);
+  // barre de vie boss (fixe, bas d'écran)
+  const b = Entities.boss;
+  if (b && !b.dead && b.introT <= 0) {
+    ctx.fillStyle = "rgba(0,0,0,0.65)"; ctx.fillRect(60, 226, 200, 9);
+    ctx.fillStyle = "#ff5555"; ctx.fillRect(62, 227, 196 * clamp(b.hp / b.maxHp, 0, 1), 5);
+    ctx.strokeStyle = "#e8eef4"; ctx.lineWidth = 1; ctx.strokeRect(60.5, 226.5, 199, 8);
+    ctx.fillStyle = "#e8eef4"; ctx.font = "7px monospace"; ctx.textAlign = "center";
+    ctx.fillText(b.name, 160, 224);
+    ctx.textAlign = "left";
+  }
+}
+
+function drawHeart(ctx, x, y, frac) {
+  ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.fillRect(x - 1, y - 1, 12, 10);
+  for (let r = 0; r < 4; r++) {
+    const w = 2 + r * 2;
+    ctx.fillStyle = frac > r / 4 ? "#ff5566" : "#3a2c34";
+    ctx.fillRect(x, y + r, w, 1);
+    ctx.fillRect(x + 8 - w, y + r, w, 1);
+  }
+  ctx.fillStyle = frac > 0.99 ? "#ff5566" : "#3a2c34";
+  ctx.fillRect(x + 1, y + 4, 8, 4);
+}
+
+// ---------- dialog box ----------
+function drawDialog(ctx) {
+  const bx = 12, by = 156, bw = VIEW_W - 24, bh = 78;
+  ctx.fillStyle = "rgba(10,17,28,0.92)"; ctx.fillRect(bx, by, bw, bh);
+  ctx.strokeStyle = "#7fd4ff"; ctx.lineWidth = 1; ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1);
+  ctx.strokeStyle = "#3a6a8a"; ctx.strokeRect(bx + 2.5, by + 2.5, bw - 5, bh - 5);
+  if (Dialog.speaker) {
+    ctx.fillStyle = "#ffb36b"; ctx.font = "bold 8px monospace";
+    ctx.fillText(Dialog.speaker, bx + 8, by + 12);
+  }
+  const line = (Dialog.lines[Dialog.idx] || "").substring(0, Dialog.chars);
+  ctx.fillStyle = "#e8eef4"; ctx.font = "8px monospace";
+  wrapText(ctx, line, bx + 8, by + (Dialog.speaker ? 25 : 14), bw - 16, 11);
+  if (Dialog.chars >= (Dialog.lines[Dialog.idx] || "").length) {
+    if (Math.floor(performance.now() / 300) % 2 === 0) {
+      ctx.fillStyle = "#7fd4ff"; ctx.fillText("▼", bx + bw - 13, by + bh - 6);
+    }
+  }
+}
+
+function wrapText(ctx, text, x, y, maxW, lh) {
+  const words = text.split(" ");
+  let line = "", yy = y;
+  for (const w of words) {
+    const test = line + w + " ";
+    if (ctx.measureText(test).width > maxW && line) {
+      ctx.fillText(line, x, yy);
+      line = w + " "; yy += lh;
+    } else line = test;
+  }
+  ctx.fillText(line, x, yy);
+}
+
+function drawToast(ctx) {
+  const a = clamp(Toast.t, 0, 1);
+  ctx.globalAlpha = a;
+  ctx.fillStyle = "rgba(10,17,28,0.92)"; ctx.fillRect(VIEW_W / 2 - 84, 28, 168, 16);
+  ctx.strokeStyle = "#ffb36b"; ctx.strokeRect(VIEW_W / 2 - 84, 28, 168, 16);
+  ctx.fillStyle = "#e8eef4"; ctx.font = "8px monospace"; ctx.textAlign = "center";
+  ctx.fillText(Toast.msg, VIEW_W / 2, 39);
+  ctx.textAlign = "left";
+  ctx.globalAlpha = 1;
+}
+
+// ---------- title / intro / gameover / ending (design space) ----------
+let titleSnow = [];
+function drawTitle(ctx) {
+  ctx.save();
+  ctx.scale(SCALE, SCALE);
+  const img = Renderer.img("title");
+  if (img) ctx.drawImage(img, 0, 0, VIEW_W, VIEW_H);
+  else { ctx.fillStyle = "#112233"; ctx.fillRect(0, 0, VIEW_W, VIEW_H); }
+  if (titleSnow.length === 0) for (let i = 0; i < 60; i++) titleSnow.push({ x: srand() * VIEW_W, y: srand() * VIEW_H, s: 0.5 + srand() });
+  ctx.fillStyle = "rgba(255,255,255,0.8)";
+  titleSnow.forEach(f => {
+    f.y += f.s * 0.6; if (f.y > VIEW_H) { f.y = -2; f.x = srand() * VIEW_W; }
+    ctx.fillRect(f.x, f.y, 1, 1);
+  });
+  ctx.fillStyle = "rgba(10,15,25,0.75)"; ctx.fillRect(0, 96, VIEW_W, 62);
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#ff8c2e"; ctx.font = "bold 17px monospace";
+  ctx.fillText("LA GRANDE FROIDEUR", VIEW_W / 2, 116);
+  ctx.fillStyle = "#7fd4ff"; ctx.font = "8px monospace";
+  ctx.fillText("~ Ti-Coq pis l'Roi du Chauffage ~", VIEW_W / 2, 130);
+  ctx.fillStyle = "#e8eef4"; ctx.font = "8px monospace";
+  const has = hasSave();
+  if (Math.floor(performance.now() / 500) % 2 === 0) {
+    ctx.fillText(has ? "[ENTRÉE] Continuer   [N] Nouvelle partie" : "[ENTRÉE] Commencer l'aventure", VIEW_W / 2, 148);
+  }
+  ctx.textAlign = "left";
+  ctx.restore();
+}
+
+function drawIntro(ctx) {
+  ctx.save();
+  ctx.scale(SCALE, SCALE);
+  const panel = INTRO_PANELS[Game.introIdx];
+  const img = Renderer.img(panel.img);
+  ctx.fillStyle = "#06090e";
+  ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  if (img) {
+    ctx.globalAlpha = 0.85;
+    ctx.drawImage(img, 0, 0, VIEW_W, VIEW_H);
+    ctx.globalAlpha = 1;
+    const g2 = ctx.createLinearGradient(0, VIEW_H * 0.45, 0, VIEW_H);
+    g2.addColorStop(0, "rgba(6,9,14,0)");
+    g2.addColorStop(1, "rgba(6,9,14,0.96)");
+    ctx.fillStyle = g2; ctx.fillRect(0, VIEW_H * 0.45, VIEW_W, VIEW_H * 0.55);
+  }
+  ctx.fillStyle = "#e8eef4"; ctx.font = "7px monospace";
+  wrapText(ctx, panel.text, 18, VIEW_H - 62, VIEW_W - 36, 9);
+  ctx.fillStyle = "#7fd4ff"; ctx.font = "7px monospace"; ctx.textAlign = "center";
+  ctx.fillText((Game.introIdx + 1) + "/4 — ENTRÉE ▸", VIEW_W / 2, VIEW_H - 8);
+  ctx.textAlign = "left";
+  ctx.restore();
+}
+
+function drawGameOver(ctx) {
+  ctx.save();
+  ctx.scale(SCALE, SCALE);
+  ctx.fillStyle = "#06080c"; ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  const img = Renderer.img("boss_roi");
+  if (img) {
+    ctx.globalAlpha = 0.25;
+    ctx.drawImage(img, VIEW_W / 2 - 70, 24, 140, 140);
+    ctx.globalAlpha = 1;
+  }
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#7fd4ff"; ctx.font = "bold 14px monospace";
+  ctx.fillText("T'AS GELÉ SUR PLACE", VIEW_W / 2, 96);
+  ctx.fillStyle = "#e8eef4"; ctx.font = "8px monospace";
+  ctx.fillText("Le froid r'garde qui vacille.", VIEW_W / 2, 116);
+  ctx.fillText("Morts: " + S.deaths + " — Souvenirs: " + S.frags + "/6", VIEW_W / 2, 128);
+  ctx.fillStyle = "#ffb36b";
+  ctx.fillText("[ENTRÉE] Repartir du village", VIEW_W / 2, 152);
+  ctx.textAlign = "left";
+  ctx.restore();
+}
+
+function drawEnding(ctx) {
+  ctx.save();
+  ctx.scale(SCALE, SCALE);
+  const img = Renderer.img("ending");
+  ctx.fillStyle = "#06080c";
+  ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  if (img) { ctx.globalAlpha = 0.85; ctx.drawImage(img, 0, 0, VIEW_W, VIEW_H); ctx.globalAlpha = 1; }
+  ctx.fillStyle = "rgba(6,9,14,0.82)";
+  ctx.fillRect(0, VIEW_H - 76, VIEW_W, 76);
+  const line = ENDING_LINES[Game.endingIdx] || "";
+  ctx.fillStyle = "#e8eef4"; ctx.font = "8px monospace"; ctx.textAlign = "center";
+  const lines = line.split("\n");
+  const lh = 11, totalH = lines.length * lh;
+  let yy = VIEW_H - 62 - (totalH - lh) / 2 + 6;
+  for (const l of lines) {
+    const words = l.split(" "); let l2 = "";
+    for (const w of words) {
+      const t = l2 + w + " ";
+      if (ctx.measureText(t).width > VIEW_W - 40 && l2) { ctx.fillText(l2, VIEW_W / 2, yy); l2 = w + " "; yy += lh; }
+      else l2 = t;
+    }
+    ctx.fillText(l2, VIEW_W / 2, yy); yy += lh;
+  }
+  ctx.fillStyle = "#7fd4ff"; ctx.font = "7px monospace";
+  ctx.fillText("ENTRÉE ▸", VIEW_W / 2, VIEW_H - 8);
+  ctx.textAlign = "left";
+  ctx.restore();
+}
+
+function drawJournal(ctx) {
+  // portrait de Ti-Coq en fond, très discret
+  const img = Renderer.img("ti_coq");
+  if (img) {
+    ctx.globalAlpha = 0.14;
+    ctx.drawImage(img, VIEW_W - 110, 14, 100, 100);
+    ctx.globalAlpha = 1;
+  }
+  ctx.fillStyle = "rgba(10,17,28,0.90)"; ctx.fillRect(10, 10, VIEW_W - 20, VIEW_H - 20);
+  if (img) {
+    ctx.save();
+    ctx.globalAlpha = 0.16;
+    ctx.drawImage(img, VIEW_W - 116, 18, 96, 96);
+    ctx.restore();
+  }
+  ctx.strokeStyle = "#7fd4ff"; ctx.strokeRect(10.5, 10.5, VIEW_W - 21, VIEW_H - 21);
+  ctx.fillStyle = "#ffb36b"; ctx.font = "bold 10px monospace";
+  ctx.fillText("JOURNAL DE TI-COQ", 20, 28);
+  ctx.fillStyle = "#e8eef4"; ctx.font = "8px monospace";
+  ctx.fillText("Souvenirs de mémère : " + S.frags + "/6", 20, 46);
+  ctx.fillText("Charbon : " + S.keys + "   |   Temps : " + fmtTime(S.playtime), 20, 58);
+  ctx.fillText("Morts : " + S.deaths + "   |   Donjons cleanés : " + Object.keys(S.bossDefeated).length + "/3", 20, 70);
+  let yy = 90;
+  ctx.font = "8px monospace";
+  for (let i = 0; i < 6; i++) {
+    if (S.flags["frag" + i]) {
+      ctx.fillStyle = "#7fd4ff";
+      ctx.fillText("▸ " + FRAGS[i].title, 20, yy); yy += 11;
+    }
+  }
+  ctx.fillStyle = "#7fd4ff"; ctx.font = "7px monospace";
+  ctx.fillText("[I] Fermer", 20, VIEW_H - 14);
+}
+
+function drawFragment(ctx) {
+  const f = Game.fragmentShown;
+  if (!f) return;
+  ctx.fillStyle = "rgba(5,8,13,0.96)"; ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#ffb36b"; ctx.font = "bold 9px monospace";
+  ctx.fillText("SOUVENIR " + (f.id + 1) + "/6", VIEW_W / 2, 60);
+  ctx.fillStyle = "#e8eef4"; ctx.font = "bold 9px monospace";
+  ctx.fillText(f.title.toUpperCase(), VIEW_W / 2, 76);
+  ctx.font = "8px monospace";
+  const paras = f.text.split("\n");
+  let yy = 100;
+  for (const l of paras) {
+    const words = l.split(" "); let l2 = "";
+    for (const w of words) {
+      const t = l2 + w + " ";
+      if (ctx.measureText(t).width > VIEW_W - 60 && l2) { ctx.fillText(l2, VIEW_W / 2, yy); l2 = w + " "; yy += 11; }
+      else l2 = t;
+    }
+    ctx.fillText(l2, VIEW_W / 2, yy); yy += 11;
+  }
+  ctx.fillStyle = "#7fd4ff"; ctx.font = "7px monospace";
+  ctx.fillText("ENTRÉE ▸", VIEW_W / 2, VIEW_H - 16);
+  ctx.textAlign = "left";
+}
+
+function drawConfirmDoor(ctx) {
+  ctx.fillStyle = "rgba(10,17,28,0.92)"; ctx.fillRect(0, VIEW_H - 46, VIEW_W, 46);
+  const dd = DUNGEON_DOORS[Game.pendingDungeon];
+  if (dd) {
+    // vignette du donjon en fond, discrète
+    const img = Renderer.img("dungeon_" + Game.pendingDungeon);
+    if (img) {
+      ctx.save();
+      ctx.globalAlpha = 0.28;
+      ctx.drawImage(img, 0, VIEW_H - 46, VIEW_W, 46);
+      ctx.restore();
+      ctx.fillStyle = "rgba(6,10,16,0.35)"; ctx.fillRect(0, VIEW_H - 46, VIEW_W, 46);
+    }
+  }
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#e8eef4"; ctx.font = "8px monospace";
+  ctx.fillText("Entrer dans " + (dd ? dd.label : "??") + " ?", VIEW_W / 2, VIEW_H - 30);
+  ctx.fillStyle = "#7fd4ff"; ctx.font = "7px monospace";
+  ctx.fillText("[ENTRÉE] Oui    [ÉCHAP] Non", VIEW_W / 2, VIEW_H - 14);
+  ctx.textAlign = "left";
+}
+
+function drawColdVignette(ctx) {
+  const g2 = ctx.createRadialGradient(VIEW_W / 2, VIEW_H / 2, VIEW_H * 0.4, VIEW_W / 2, VIEW_H / 2, VIEW_H * 0.78);
+  g2.addColorStop(0, "rgba(20,40,70,0)");
+  g2.addColorStop(1, "rgba(20,40,70,0.42)");
+  ctx.fillStyle = g2;
+  ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  if (!Game.snowflakes) {
+    Game.snowflakes = [];
+    for (let i = 0; i < 40; i++) Game.snowflakes.push({ x: srand() * VIEW_W, y: srand() * VIEW_H, s: 0.4 + srand() });
+  }
+  ctx.fillStyle = "rgba(255,255,255,0.55)";
+  Game.snowflakes.forEach(f => {
+    f.y += f.s * 0.5; f.x += Math.sin(f.y / 24) * 0.15;
+    if (f.y > VIEW_H) { f.y = -2; f.x = srand() * VIEW_W; }
+    ctx.fillRect(f.x, f.y, 1, 1);
+  });
+}
+
+// petits helpers d'overlay
+function warmDoorGlow(ctx, sx, sy) {
+  ctx.fillStyle = "rgba(255,170,60,0.15)";
+  ctx.fillRect(sx - 2, sy - 2, 20, 20);
+}
+function stoveFlames(ctx, sx, sy) {
+  const t = performance.now() / 150;
+  for (let i = 0; i < 3; i++) {
+    const fh = 3 + Math.sin(t + i * 2) * 2;
+    ctx.fillStyle = i === 0 ? "#ff8c2e" : "#ffd27f";
+    ctx.fillRect(sx + 5 + i * 3, sy + 9 - fh, 2, fh + 2);
+  }
+}
+function drawChestOpenOverlay(ctx, tx, ty, sx, sy) {
+  if (S.openedChests[S.map + ":" + tx + ":" + ty]) {
+    ctx.drawImage(Renderer.atlas, 18 * 16, 0, 16, 16, sx, sy, 16, 16);
+  }
+}
+
+/* ==== 08_game.js ==== */
+"use strict";
+/* ============================================================
+   GAME — machine à états + main loop + boot
+   ============================================================ */
+
+const Game = {
+  state: "title", // title | intro | play | dialog | journal | fragment | confirmdoor | gameover | ending
+  introIdx: 0, endingIdx: 0,
+  fragmentShown: null,
+  pendingDungeon: null, confirmDoor: false,
+  exitCd: 0, bossJustDied: null,
+  lastT: 0, acc: 0,
+
+  setState(s) {
+    this.state = s;
+  },
+
+  update(dt) {
+    if (this.exitCd > 0) this.exitCd -= dt;
+    S.playtime += (this.state === "play" || this.state === "dialog") ? dt : 0;
+
+    switch (this.state) {
+      case "title":
+        if (keyPressed("interact")) { startNewOrContinue(false); }
+        if (pressed["n"] || pressed["N"]) { startNewOrContinue(true); }
+        break;
+
+      case "intro":
+        if (keyPressed("interact")) {
+          this.introIdx++;
+          if (this.introIdx >= INTRO_PANELS.length) {
+            // première construction du monde (position sauvée = spawn overworld)
+            enterMap(S.map === "overworld" ? "overworld" : S.map, null);
+            this.setState("play");
+            saveGame();
+          }
+        }
+        break;
+
+      case "play":
+        Entities.update(dt);
+        checkExits();
+        if (keyPressed("journal")) Journal.toggle();
+        if (keyPressed("mute")) AudioSys.setMuted(!AudioSys.muted);
+        // boss mort → dialogue + fragment
+        if (this.bossJustDied) {
+          const kind = this.bossJustDied; this.bossJustDied = null;
+          Entities.boss = null;
+          const fragId = { frigor: 0, sludger: 3, roi: 5 }[kind];
+          const bossLines = {
+            dep: ["Le frigo s'effondre dans un dernier ronron glacé.", "Derrière la porte brisée : un coffre de mémère, intact.", "Dedans, un souvenir, chaud comme un dimanche."],
+            usine: ["Le Sludge-O-Matic retombe, inerte, dans son propre bassin.", "Au fond de la cuve, un souvenir de mémère flotte comme une huile propre.", "« La chaleur qui serre étrangle... »"],
+            chateau: ["L'Roi du Chauffage s'effondre sur ses barils.", "La lanterne en cage roule jusqu'à tes pieds.", "Dedans... un souvenir de mémère. Pas la flamme. Le souvenir."]
+          }[kind];
+          Dialog.start(bossLines, "", () => { giveFragment(fragId); });
+        }
+        break;
+
+      case "dialog": Dialog.update(dt); break;
+
+      case "journal":
+        if (keyPressed("journal") || keyPressed("interact")) Journal.toggle();
+        break;
+
+      case "fragment":
+        if (keyPressed("interact")) this.setState("play");
+        break;
+
+      case "confirmdoor":
+        if (keyPressed("interact")) {
+          const target = this.pendingDungeon;
+          this.pendingDungeon = null;
+          if (target) { enterMap(target); AudioSys.sfx("door"); }
+          this.setState("play");
+        }
+        if (keyPressed("pause")) { this.pendingDungeon = null; this.setState("play"); }
+        break;
+
+      case "gameover":
+        if (keyPressed("interact")) {
+          S.hp = S.maxHp;
+          enterMap("overworld", { x: 24, y: 25 });
+          this.setState("play");
+        }
+        break;
+
+      case "ending":
+        if (keyPressed("interact")) {
+          this.endingIdx++;
+          if (this.endingIdx >= ENDING_LINES.length) {
+            this.setState("title");
+            this.endingIdx = 0;
+            wipeSave();
+          }
+        }
+        break;
+    }
+  }
+};
+
+function startNewOrContinue(forceNew) {
+  AudioSys.init(); AudioSys.resume();
+  if (forceNew) wipeSave();
+  if (!forceNew && hasSave()) { loadGame(); }
+  else { S = defaultState(); }
+  if (forceNew || S.playtime === 0 || !S.flags.booted) {
+    S.flags.booted = 1;
+    Game.introIdx = 0;
+    Game.setState("intro");
+  } else {
+    // reprendre: reconstruire la map courante à la position sauvegardée
+    const tx = clamp(Math.floor(S.x / TILE), 1, 58), ty = clamp(Math.floor(S.y / TILE), 1, 38);
+    enterMap(S.map, { x: tx, y: ty });
+    Game.setState("play");
+  }
+}
+
+function startEnding() {
+  Game.endingIdx = 0;
+  Game.setState("ending");
+  AudioSys.sfx("jingle");
+  S.endingSeen = true;
+  saveGame();
+}
+
+// ---------- MAIN LOOP ----------
+function loop(t) {
+  const dt = Math.min(0.05, (t - Game.lastT) / 1000 || 0.016);
+  Game.lastT = t;
+  Game.update(dt);
+  renderFrame(dt);
+  clearPressed();
+  requestAnimationFrame(loop);
+}
+
+// ---------- BOOT ----------
+function boot() {
+  Renderer.init();
+  // si un save existe: pas d'enterMap encore — se fait dans startNewOrContinue
+  window.addEventListener("keydown", () => { AudioSys.init(); AudioSys.resume(); }, { once: true });
+  requestAnimationFrame(ts => { Game.lastT = ts; requestAnimationFrame(loop); });
+}
+window.addEventListener("DOMContentLoaded", boot);
+
+// garde pour tests headless
+if (typeof module !== "undefined" && module.exports) { module.exports = { Game, Entities, S: () => S }; }
+</script>
+</body>
+</html>

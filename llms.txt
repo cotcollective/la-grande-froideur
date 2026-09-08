@@ -1,0 +1,35 @@
+# LA GRANDE FROIDEUR
+
+> Zelda-like 2D post-apocalyptique québécois dans un seul fichier HTML. Ti-Coq, un jeune coureur de bois, traverse un Québec gelé pour récupérer la flamme volée par « l'Roi du Chauffage ». Un jeu sur la chaleur qu'on se donne, pas qu'on possède.
+
+## URL du jeu
+
+- https://lagrandefroideur.surge.sh (miroir crawlable: voir GitHub Pages)
+
+## Ce que c'est
+
+- Action-aventure 2D top-down (style Zelda / NES), canvas 2D vanilla JavaScript, zéro framework, zéro build, un seul fichier index.html (~98KB) + assets PNG
+- Québécois: dialogues en joual, post-apo hivernal, thèmes de mutualité vs survie individuelle (tempête de verglas 1998, poêle à bois mémère)
+- 3 donjons-boss (Dépanneur/Frigor, Usine/Sludger, Château/Roi du Chauffage), 6 fragments de souvenirs à collectionner, fin narrative
+- Mort permanente douce: le timer de froid tue, les feux réchauffent
+- Audio procédural WebAudio (aucun fichier audio)
+
+## Contrôles
+
+- ZQSD / WASD / flèches: bouger
+- E / Entrée: interagir, dialogues
+- Espace / J: coup de poêlon
+- I: journal (souvenirs + stats)
+- M: couper le son
+
+## Fiche technique
+
+- Canvas 2D, rendu pixel-art 320x240 scalé x3, image-rendering: pixelated
+- Collision AABB tile-based, résolution X/Y séparée
+- Save localStorage (clé la_grande_froideur_save_v1)
+- Assets d'illustration générés par IA (SDXL/ComfyUI), sprites procéduraux en code
+- Déployé statiquement (Surge.sh / GitHub Pages), aucune API, aucune donnée collectée
+
+## Licence / contact
+
+Projet perso de Dave Senez (Montréal), 2026. Pas de tracking, pas de pub.
