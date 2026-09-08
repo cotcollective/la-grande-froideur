@@ -145,6 +145,12 @@ const AudioSys = {
       case "fireball": this.noise(0.2, 0.1, 600); this.tone(300, 0.15, "sawtooth", 0.07, 150); break;
       case "sludge": this.tone(90, 0.25, "sawtooth", 0.12, 50); this.noise(0.2, 0.07, 250); break;
       case "flame": this.noise(0.3, 0.09, 900); this.tone(180, 0.25, "sawtooth", 0.05, 80); break;
+      case "tadam": // révélation d'easter egg — accord majeur en montée
+        [261.6, 329.6, 392, 523.3].forEach((f, i) => {
+          this.tone(f, 1.6, "triangle", 0.14, null, this.ctx.currentTime + i * 0.09);
+          this.tone(f / 2, 1.8, "sine", 0.1, null, this.ctx.currentTime + i * 0.09);
+        });
+        break;
     }
   },
   // vent ambiant (bruit filtré + LFO)
@@ -346,6 +352,37 @@ const NPCS = [
       "Y'a mis la flamme en cage pasqu'y'avait peur qu'elle meure. C'est ça, le trouble avec la peur : ça garde tout pis ça donne rien.",
       "Prends le charbon de ma stove, mon garçon. Moé, j'ai pus le souffle pour l'allumer de toute façon."
     ] }
+];
+
+// ---------- EASTER EGG: LA TEMPÊTE DE VERGLAS 98 ----------
+// slideshow éducatif — les vrais chiffres de la tempête (janvier 1998)
+const STORM_SLIDES = [
+  {
+    title: "LA TEMPÊTE DE VERGLAS — JANVIER 1998",
+    text: "Du 5 au 10 janvier 1998, trois vagues de verglas\nsont tombées sur le sud du Québec.\n80 mm de glace — l'épaisseur d'une cheville —\nsur les fils, les branches, les toits.",
+    draw: "ice"
+  },
+  {
+    title: "3 MILLIONS DE GENS DANS LE NOIR",
+    draw: "dark",
+    text: "Au pire de la tempête, 3 millions de Québécois\nont perdu le courant. Certains villages ont passé\nplus de 30 jours sans électricité.\nEn plein hiver. À -20 pis plus froid."
+  },
+  {
+    title: "LE RÉSEAU S'EFFONDRE",
+    draw: "towers",
+    text: "Le poids de la glace a écrasé 120 000 km de fils\npis 25 000 poteaux. Des tours de transmission\nde 100 tonnes se sont écroulées comme des allumettes.\nLe quartier de la Cité-Jardin, à Saint-Bruno, a dû être évacué."
+  },
+  {
+    title: "LE SUD RICHE A HÉBERGÉ LE SUD VIDE",
+    draw: "mutual",
+    text: "L'armée est arrivée : 12 000 soldats.\nLes gens de Montréal qui avaient du courant\nont ouvert leurs portes à ceux qui n'en avaient pas.\nDes familles inconnues ont dormi ensemble pendant des semaines."
+  },
+  {
+    title: "8 MORTS, 1 LEÇON",
+    draw: "flame",
+    text: "30 Québécois ont perdu la vie — du froid, des chutes,\ndes incendies causés par les poêles de fortune.\nLa leçon du 98, c'est celle de mémère :\nun réseau, c'est fort quand chaque maison garde\nune flamme pour l'autre.",
+    last: true
+  }
 ];
 
 const SIGNS_TEXT = {
@@ -556,6 +593,16 @@ function genOverworld() {
   // coffre du lac posé APRÈS les canaux (sinon écrasé par le canal sud)
   grid[19][54] = "C";
   chestRegistry["54,19"] = 4;
+
+  // ---- 4b) EASTER EGG: le Bloc-Mémoire (slideshow tempête de verglas 98) ----
+  // petit îlot de glace craquée au nord-est du lac, un bloc R scellé devant un monolithe M
+  // (l'espace reste vide/invisible: le M ne se révèle qu'une fois le bloc cassé, avec tadam)
+  grid[10][56] = "x"; grid[10][57] = "x"; grid[10][58] = "x";
+  grid[11][56] = "x"; grid[11][57] = "M"; grid[11][58] = "x";
+  grid[12][56] = "R"; grid[12][57] = "x"; grid[12][58] = "x";
+  // voie d'eau qui connecte l'îlot au lac (depuis le bord du lac à (54,15))
+  for (const [wx, wy] of [[55, 15], [55, 14], [55, 13], [55, 12], [55, 11]]) grid[wy][wx] = "~";
+  grid[12][55] = "~";  // accès ouest de l'îlot, face au bloc R
 
   // charbon + poutines (tuiles ramassables "c"/"q" sur cellules marchables)
   CHARBON_SPOTS.forEach(s => { const [cx, cy] = nearestWalkable(grid, s.x, s.y); grid[cy][cx] = "c"; });
@@ -1055,6 +1102,11 @@ const Entities = {
         S.brokenBlocks[S.map + ":" + tx + ":" + ty] = 1;
         AudioSys.sfx(ch === "R" ? "shatter" : "clang");
         spawnParticles(tx * TILE + 8, ty * TILE + 8, 6, ch === "R" ? "#bfe9ff" : "#8a6f4d");
+        // easter egg: casser le bloc R du Bloc-Mémoire révèle le monolithe pis fait le tadam
+        if (ch === "R" && S.map === "overworld" && g(tx + 1, ty) === "M") {
+          AudioSys.sfx("tadam");
+          toast("...un monolithe s'est réveillé dans la glace.");
+        }
       }
     }
     if (this.swing.t <= 0) { this.swing = null; this._swingRect = null; }
@@ -1374,6 +1426,16 @@ function tryInteract() {
 
   // porte de donjon
   if (ch === "D") { doorInteract(fx, fy); return; }
+
+  // easter egg: le Bloc-Mémoire (tempête de verglas 98)
+  if (ch === "M" && S.map === "overworld") {
+    Game.stormIdx = 0;
+    Game.setState("storm");
+    AudioSys.sfx("tadam");
+    S.flags.stormSeen = 1;
+    saveGame();
+    return;
+  }
 
   // porte verrouillée (donjon)
   if (ch === "d") { lockedDoorInteract(fx, fy); return; }
@@ -1748,6 +1810,7 @@ function tileIndex(ch, theme) {
     case "d": return 20;
     case "p": return 21;
     case "E": return 22;
+    case "M": return 11; // le Bloc-Mémoire: poêle éteint sculpté (atlas 11), halo doré ajouté au draw
     default: return 23;
   }
 }
@@ -1758,6 +1821,18 @@ function tileIndex(ch, theme) {
    RENDER B — frame rendering (monde, entities, HUD, states)
    Tout l'UI est dessiné en espace design 320x240 (scalé x3).
    ============================================================ */
+
+// le Bloc-Mémoire: pulsation dorée discrète (révélé seulement après cassage du bloc R)
+function monolithGlow(ctx, sx, sy) {
+  if (!S.brokenBlocks["overworld:56:12"]) return;
+  const t = performance.now() / 1000;
+  const pul = 0.35 + Math.sin(t * 2.2) * 0.2;
+  const g2 = ctx.createRadialGradient(sx + 8, sy + 8, 2, sx + 8, sy + 8, 22);
+  g2.addColorStop(0, `rgba(255,200,110,${pul})`);
+  g2.addColorStop(1, "rgba(255,200,110,0)");
+  ctx.fillStyle = g2;
+  ctx.fillRect(sx - 14, sy - 14, 32, 32);
+}
 
 function renderFrame(dt) {
   const ctx = Renderer.ctx;
@@ -1798,6 +1873,7 @@ function renderFrame(dt) {
     if (ch === "o" && S.map === "overworld") warmDoorGlow(ctx, sx, sy);
     if (ch === "S" && S.stovesLit.place) stoveFlames(ctx, sx, sy);
     if (ch === "C") drawChestOpenOverlay(ctx, tx, ty, sx, sy);
+    if (ch === "M") monolithGlow(ctx, sx, sy);
   }
 
   // poêle commun allumé : halo
@@ -1851,6 +1927,7 @@ function renderFrame(dt) {
   if (Toast.t > 0) drawToast(ctx);
   if (Game.state === "journal") drawJournal(ctx);
   if (Game.state === "fragment") drawFragment(ctx);
+  if (Game.state === "storm") drawStorm(ctx);
   if (Game.state === "confirmdoor") drawConfirmDoor(ctx);
   drawColdVignette(ctx);
   ctx.restore();
@@ -2249,6 +2326,97 @@ function drawFragment(ctx) {
   ctx.textAlign = "left";
 }
 
+// ---------- EASTER EGG: slideshow tempête de verglas 98 ----------
+function drawStorm(ctx) {
+  const slide = STORM_SLIDES[Game.stormIdx];
+  if (!slide) return;
+  // fond bleu-nuit verglas
+  const g0 = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+  g0.addColorStop(0, "#0b1626");
+  g0.addColorStop(1, "#13233a");
+  ctx.fillStyle = g0; ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+  // ---- illustration procédurale par slide (moitié haute) ----
+  const t = performance.now() / 1000;
+  ctx.save();
+  if (slide.draw === "ice") {
+    // pluie verglaçante: traits bleus qui tombent + halo givré
+    for (let i = 0; i < 40; i++) {
+      const sx = (i * 53 + (t * 60) % 320) % VIEW_W;
+      const sy = (i * 37 + t * 90) % (VIEW_H * 0.55);
+      ctx.strokeStyle = "rgba(160,210,255,0.5)";
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx - 2, sy + 7); ctx.stroke();
+    }
+    ctx.fillStyle = "rgba(140,200,255,0.12)";
+    ctx.fillRect(0, VIEW_H * 0.45, VIEW_W, 14);
+  } else if (slide.draw === "dark") {
+    // village noir avec 3 fenêtres allumées (chandelles)
+    for (let i = 0; i < 7; i++) {
+      const hx = 20 + i * 42, hy = VIEW_H * 0.34;
+      ctx.fillStyle = "#0d1520"; ctx.fillRect(hx, hy, 30, 24);
+      ctx.fillStyle = "#141d2b"; ctx.fillRect(hx - 3, hy - 8, 36, 8);
+    }
+    [[52, 44], [138, 42], [262, 45]].forEach(([wx, wy]) => {
+      const fl = 0.7 + Math.sin(t * 6 + wx) * 0.3;
+      ctx.fillStyle = `rgba(255,190,90,${fl})`;
+      ctx.fillRect(wx, wy, 3, 4);
+      ctx.fillStyle = `rgba(255,190,90,${fl * 0.15})`;
+      ctx.fillRect(wx - 5, wy - 5, 13, 14);
+    });
+  } else if (slide.draw === "towers") {
+    // tours de transmission penchées/couchées
+    const tw = (x, hgt, angle) => {
+      ctx.save(); ctx.translate(x, VIEW_H * 0.52); ctx.rotate(angle);
+      ctx.strokeStyle = "#3d5166"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(-8, 0); ctx.lineTo(0, -hgt); ctx.lineTo(8, 0); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-6, -hgt * 0.4); ctx.lineTo(6, -hgt * 0.4);
+      ctx.moveTo(-4, -hgt * 0.7); ctx.lineTo(4, -hgt * 0.7); ctx.stroke();
+      ctx.restore();
+    };
+    tw(40, 50, 0); tw(100, 54, 0.15); tw(160, 46, 1.2); tw(230, 52, 0.05); tw(290, 48, -0.9);
+    ctx.strokeStyle = "#2c3c4e";
+    ctx.beginPath(); ctx.moveTo(40, VIEW_H * 0.52 - 46); ctx.quadraticCurveTo(130, VIEW_H * 0.45, 290, VIEW_H * 0.52 - 40); ctx.stroke();
+  } else if (slide.draw === "mutual") {
+    // deux maisons reliées par une lumière échangée
+    ctx.fillStyle = "#0d1520";
+    ctx.fillRect(30, VIEW_H * 0.34, 40, 26); ctx.fillRect(250, VIEW_H * 0.34, 40, 26);
+    ctx.fillStyle = "#141d2b";
+    ctx.fillRect(27, VIEW_H * 0.34 - 8, 46, 8); ctx.fillRect(247, VIEW_H * 0.34 - 8, 46, 8);
+    const pul = 0.5 + Math.sin(t * 3) * 0.3;
+    const g1 = ctx.createLinearGradient(70, 0, 250, 0);
+    g1.addColorStop(0, `rgba(255,190,90,${pul})`);
+    g1.addColorStop(1, `rgba(255,220,140,${pul})`);
+    ctx.fillStyle = g1;
+    ctx.fillRect(70, VIEW_H * 0.34 + 10, 180, 3);
+  } else if (slide.draw === "flame") {
+    // la flamme de mémère — 8 petites flammes, une par mort honorée
+    for (let i = 0; i < 8; i++) {
+      const fx = 40 + i * 34, fh = 6 + Math.sin(t * 5 + i * 1.7) * 3;
+      ctx.fillStyle = "#ff8c2e";
+      ctx.fillRect(fx - 2, VIEW_H * 0.5 - fh, 4, fh);
+      ctx.fillStyle = "#ffd27f";
+      ctx.fillRect(fx - 1, VIEW_H * 0.5 - fh + 2, 2, fh - 3);
+      ctx.fillStyle = "#3a2c1a";
+      ctx.fillRect(fx - 4, VIEW_H * 0.5, 8, 3);
+    }
+  }
+  ctx.restore();
+
+  // ---- panneau texte (moitié basse) ----
+  ctx.fillStyle = "rgba(8,13,22,0.88)";
+  ctx.fillRect(12, VIEW_H * 0.56, VIEW_W - 24, VIEW_H * 0.38);
+  ctx.strokeStyle = "#7fd4ff"; ctx.strokeRect(12.5, VIEW_H * 0.56 + 0.5, VIEW_W - 25, VIEW_H * 0.38 - 1);
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#ffb36b"; ctx.font = "bold 8px monospace";
+  ctx.fillText(slide.title, VIEW_W / 2, VIEW_H * 0.56 + 14);
+  ctx.fillStyle = "#e8eef4"; ctx.font = "7px monospace";
+  const lines = slide.text.split("\n");
+  lines.forEach((l, i) => ctx.fillText(l, VIEW_W / 2, VIEW_H * 0.56 + 28 + i * 9));
+  ctx.fillStyle = "#7fd4ff";
+  ctx.fillText(slide.last ? "[ENTRÉE] Fermer" : "[ENTRÉE] Suite (" + (Game.stormIdx + 1) + "/" + STORM_SLIDES.length + ")", VIEW_W / 2, VIEW_H - 10);
+  ctx.textAlign = "left";
+}
+
 function drawConfirmDoor(ctx) {
   ctx.fillStyle = "rgba(10,17,28,0.92)"; ctx.fillRect(0, VIEW_H - 46, VIEW_W, 46);
   const dd = DUNGEON_DOORS[Game.pendingDungeon];
@@ -2379,6 +2547,17 @@ const Game = {
 
       case "fragment":
         if (keyPressed("interact")) this.setState("play");
+        break;
+
+      case "storm":
+        if (keyPressed("interact")) {
+          if (Game.stormIdx < STORM_SLIDES.length - 1) {
+            Game.stormIdx++;
+            AudioSys.sfx("blip");
+          } else {
+            this.setState("play");
+          }
+        }
         break;
 
       case "confirmdoor":
