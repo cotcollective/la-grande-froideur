@@ -75,10 +75,39 @@ function fitScale() {
   SCALE = Math.max(2, Math.min(4, Math.floor(s) || 2));
   const c = document.getElementById("game");
   if (c) {
-    c.width = VIEW_W * SCALE; c.height = VIEW_H * SCALE;
-    c.style.width = (VIEW_W * SCALE) + "px"; c.style.height = (VIEW_H * SCALE) + "px";
+    // mobile: canvas pleine page — le devicePixelRatio s'occupe de la netteté,
+    // le letterbox 4:3 se fait DANS le canvas par VIEW_T (pas de bandes hors-canvas)
+    if (isTouchScreen()) {
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      c.width = Math.floor(window.innerWidth * dpr);
+      c.height = Math.floor(window.innerHeight * dpr);
+      c.style.width = "100vw"; c.style.height = "100vh";
+      c.style.border = "none"; c.style.borderRadius = "0"; c.style.boxShadow = "none";
+    } else {
+      c.width = VIEW_W * SCALE; c.height = VIEW_H * SCALE;
+      c.style.width = (VIEW_W * SCALE) + "px"; c.style.height = (VIEW_H * SCALE) + "px";
+    }
     if (Renderer.ctx) { Renderer.ctx.imageSmoothingEnabled = false; }
   }
+  if (typeof fitViewportTransform === "function") fitViewportTransform();
+}
+function isTouchScreen() {
+  return window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+}
+// le canvas peut être plus grand/petit que 320x240*SCALE (mobile étiré):
+// le renderer doit letterboxer le monde 4:3 DANS le canvas pour garder le ratio correct
+let VIEW_T = { scale: 3, ox: 0, oy: 0, w: VIEW_W, h: VIEW_H }; // transform viewport réel
+function fitViewportTransform() {
+  const c = document.getElementById("game");
+  if (!c) return;
+  const cw = c.width, ch = c.height;
+  // on veut afficher 320x240 design dedans, en gardant le ratio, avec letterbox si besoin
+  const s = Math.min(cw / VIEW_W, ch / VIEW_H);
+  VIEW_T.scale = s;
+  VIEW_T.w = Math.floor(VIEW_W * s);
+  VIEW_T.h = Math.floor(VIEW_H * s);
+  VIEW_T.ox = Math.floor((cw - VIEW_T.w) / 2);
+  VIEW_T.oy = Math.floor((ch - VIEW_T.h) / 2);
 }
 const FPS_CAP = 60;
 const SOLID = new Set(["#", "T", "H", "W", "o", "L", "B", "S", "R"]);
@@ -256,6 +285,24 @@ const AudioSys = {
           this.tone(f, 1.6, "triangle", 0.14, null, this.ctx.currentTime + i * 0.09);
           this.tone(f / 2, 1.8, "sine", 0.1, null, this.ctx.currentTime + i * 0.09);
         });
+        break;
+      case "victory": // FANFARE DE FIN — la flamme est revenue
+        {
+          const t0 = this.ctx.currentTime;
+          // arpège montant qui monte l'énergie (C E G C E G C)
+          [261.6, 329.6, 392, 523.3, 659.3, 784, 1046.5].forEach((f, i) => {
+            this.tone(f, 0.14, "square", 0.11, null, t0 + i * 0.09);
+            this.tone(f / 2, 0.16, "triangle", 0.09, null, t0 + i * 0.09);
+          });
+          // le grand accord final tenu (C majeur complet + octave)
+          [261.6, 329.6, 392, 523.3, 659.3].forEach((f, i) => {
+            this.tone(f, 2.8, "triangle", 0.12, null, t0 + 0.72 + i * 0.02);
+            this.tone(f / 2, 3.0, "sine", 0.09, null, t0 + 0.72 + i * 0.02);
+          });
+          // roll de cymbales (noise qui monte)
+          this.noise(0.9, 0.06, 5000, t0 + 0.15);
+          this.noise(1.6, 0.08, 7000, t0 + 0.72);
+        }
         break;
     }
   },
@@ -737,6 +784,13 @@ function genOverworld() {
   placeSign(DUNGEON_DOORS.chateau.x - 3, DUNGEON_DOORS.chateau.y + 2, SIGNS_TEXT.chateau);
   placeSign(18, 12, SIGNS_TEXT.place);
   placeSign(46, 21, SIGNS_TEXT.lake);
+
+  // NPC: recalage sur tuile marchable la plus proche (les positions voulues peuvent être mangées
+  // par les structures/clearances)
+  Object.entries(POI.npc).forEach(([id, [nx, ny]]) => {
+    const [wx, wy] = nearestWalkable(grid, nx, ny);
+    POI.npc[id] = [wx, wy];
+  });
 
   // lampadaires (sur routes, jamais sur les 2 voies complètes)
   for (let i = 0; i < 22; i++) {
@@ -1962,28 +2016,29 @@ function monolithGlow(ctx, sx, sy) {
 
 function renderFrame(dt) {
   const ctx = Renderer.ctx;
-  // clear en espace design APRÈS scale — couvre tout le canvas
-  ctx.fillStyle = "#0a0e14";
+  // reset COMPLET du canvas chaque frame (le clear réinitialise aussi la transform)
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#05070b";
+  ctx.fillRect(0, 0, Renderer.canvas.width, Renderer.canvas.height);
+  // transform viewport: letterbox DANS le canvas (mobile étiré) sinon SCALE entier
   ctx.save();
-  ctx.scale(SCALE, SCALE);
-  ctx.fillRect(0, 0, VIEW_W, VIEW_H);
-  ctx.restore();
+  ctx.translate(VIEW_T.ox, VIEW_T.oy);
+  ctx.scale(VIEW_T.scale, VIEW_T.scale);
 
   const st = Game.state;
-  if (st === "title") { drawTitle(ctx); return; }
-  if (st === "intro") { drawIntro(ctx); return; }
-  if (st === "gameover") { drawGameOver(ctx); return; }
-  if (st === "ending") { drawEnding(ctx); return; }
-  if (!MAP) return;
+  if (st === "title") { drawTitle(ctx); ctx.restore(); return; }
+  if (st === "intro") { drawIntro(ctx); ctx.restore(); return; }
+  if (st === "gameover") { drawGameOver(ctx); ctx.restore(); return; }
+  if (st === "ending") { drawEnding(ctx); ctx.restore(); return; }
+  if (!MAP) { ctx.restore(); return; }
 
-  // ---- monde (design space 320x240, caméra translate, SCALE ×3) ----
+  // ---- monde (design space 320x240, caméra translate) ----
   const p = Entities.player;
   if (p) {
     camera.x = clamp(p.x + p.w / 2 - VIEW_W / 2, 0, MAP.w * TILE - VIEW_W);
     camera.y = clamp(p.y + p.h / 2 - VIEW_H / 2, 0, MAP.h * TILE - VIEW_H);
   }
   ctx.save();
-  ctx.scale(SCALE, SCALE);
   ctx.translate(-Math.round(camera.x), -Math.round(camera.y));
 
   const theme = S.map === "overworld" ? "snow"
@@ -2047,7 +2102,6 @@ function renderFrame(dt) {
 
   // ---- UI (design space, fixe à l'écran) ----
   ctx.save();
-  ctx.scale(SCALE, SCALE);
   drawHUD(ctx);
   if (Dialog.active) drawDialog(ctx);
   if (Toast.t > 0) drawToast(ctx);
@@ -2291,7 +2345,6 @@ function drawToast(ctx) {
 let titleSnow = [];
 function drawTitle(ctx) {
   ctx.save();
-  ctx.scale(SCALE, SCALE);
   const img = Renderer.img("title");
   if (img) ctx.drawImage(img, 0, 0, VIEW_W, VIEW_H);
   else { ctx.fillStyle = "#112233"; ctx.fillRect(0, 0, VIEW_W, VIEW_H); }
@@ -2318,7 +2371,6 @@ function drawTitle(ctx) {
 
 function drawIntro(ctx) {
   ctx.save();
-  ctx.scale(SCALE, SCALE);
   const panel = INTRO_PANELS[Game.introIdx];
   const img = Renderer.img(panel.img);
   ctx.fillStyle = "#06090e";
@@ -2343,7 +2395,6 @@ function drawIntro(ctx) {
 
 function drawGameOver(ctx) {
   ctx.save();
-  ctx.scale(SCALE, SCALE);
   ctx.fillStyle = "#06080c"; ctx.fillRect(0, 0, VIEW_W, VIEW_H);
   const img = Renderer.img("boss_roi");
   if (img) {
@@ -2365,29 +2416,85 @@ function drawGameOver(ctx) {
 
 function drawEnding(ctx) {
   ctx.save();
-  ctx.scale(SCALE, SCALE);
-  const img = Renderer.img("ending");
+  const isVictory = Game.endingIdx === 0; // l'écran de stats ouvre le bal
+  const img = Renderer.img(isVictory ? "ending" : "ending");
   ctx.fillStyle = "#06080c";
   ctx.fillRect(0, 0, VIEW_W, VIEW_H);
-  if (img) { ctx.globalAlpha = 0.85; ctx.drawImage(img, 0, 0, VIEW_W, VIEW_H); ctx.globalAlpha = 1; }
-  ctx.fillStyle = "rgba(6,9,14,0.82)";
-  ctx.fillRect(0, VIEW_H - 76, VIEW_W, 76);
-  const line = ENDING_LINES[Game.endingIdx] || "";
-  ctx.fillStyle = "#e8eef4"; ctx.font = "8px monospace"; ctx.textAlign = "center";
-  const lines = line.split("\n");
-  const lh = 11, totalH = lines.length * lh;
-  let yy = VIEW_H - 62 - (totalH - lh) / 2 + 6;
-  for (const l of lines) {
-    const words = l.split(" "); let l2 = "";
-    for (const w of words) {
-      const t = l2 + w + " ";
-      if (ctx.measureText(t).width > VIEW_W - 40 && l2) { ctx.fillText(l2, VIEW_W / 2, yy); l2 = w + " "; yy += lh; }
-      else l2 = t;
+  if (img && !isVictory) { ctx.globalAlpha = 0.85; ctx.drawImage(img, 0, 0, VIEW_W, VIEW_H); ctx.globalAlpha = 1; }
+
+  if (isVictory) {
+    // ===== ÉCRAN DE VICTOIRE : stats pis confettis dorés =====
+    const t = performance.now() / 1000;
+    // confettis neige-dorée (la froideur pis la flamme ensemble)
+    if (!Game.confetti) {
+      Game.confetti = [];
+      for (let i = 0; i < 70; i++) Game.confetti.push({
+        x: Math.random() * VIEW_W, y: -Math.random() * VIEW_H,
+        s: 0.5 + Math.random() * 1.4, gold: Math.random() < 0.5,
+        w: 1 + Math.random() * 2, ph: Math.random() * 7
+      });
     }
-    ctx.fillText(l2, VIEW_W / 2, yy); yy += lh;
+    Game.confetti.forEach(c => {
+      c.y += c.s; c.x += Math.sin(t * 2 + c.ph) * 0.4;
+      if (c.y > VIEW_H) { c.y = -4; c.x = Math.random() * VIEW_W; }
+      ctx.fillStyle = c.gold ? "rgba(255,200,90,0.85)" : "rgba(180,220,255,0.7)";
+      ctx.fillRect(c.x, c.y, c.w, c.w);
+    });
+    // halo de flamme qui pulse derrière le titre
+    const pul = 0.5 + Math.sin(t * 2.5) * 0.25;
+    const g0 = ctx.createRadialGradient(VIEW_W / 2, 78, 10, VIEW_W / 2, 78, 90);
+    g0.addColorStop(0, `rgba(255,170,60,${0.35 * pul})`);
+    g0.addColorStop(1, "rgba(255,170,60,0)");
+    ctx.fillStyle = g0; ctx.fillRect(0, 0, VIEW_W, 170);
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffb36b"; ctx.font = "bold 16px monospace";
+    ctx.fillText("LA FLAMME EST À TOI", VIEW_W / 2, 52);
+    ctx.fillStyle = "#ffd894"; ctx.font = "9px monospace";
+    ctx.fillText("Le village est sauvé du grand froid", VIEW_W / 2, 68);
+    ctx.strokeStyle = "#ffb36b"; ctx.strokeRect(VIEW_W / 2 - 70.5, 76.5, 141, 0);
+    // stats de la run
+    ctx.fillStyle = "#e8eef4"; ctx.font = "8px monospace";
+    const st = [
+      ["Souvenirs de mémère", S.frags + " / 6"],
+      ["Temps", fmtTime(S.playtime)],
+      ["Morts", String(S.deaths)],
+      ["Charbon ramassé", String(S.keys)],
+      ["Arme", S.weapon === "bec" ? "Le Bec de Gaz" : "Le poêlon"]
+    ];
+    st.forEach(([k, v], i) => {
+      const yy = 96 + i * 12;
+      ctx.textAlign = "left";  ctx.fillStyle = "#8fa8c0"; ctx.fillText(k, 64, yy);
+      ctx.textAlign = "right"; ctx.fillStyle = "#7fd4ff"; ctx.fillText(v, VIEW_W - 64, yy);
+    });
+    ctx.textAlign = "center";
+    // rang (fun, calculé)
+    const rank = S.deaths === 0 ? "TI-COQ LÉGENDAIRE" : S.deaths <= 2 ? "GARDIEN DU FEU" : S.deaths <= 5 ? "BÛCHERON DU NORD" : "CHAMPION DU RÉCHAUD";
+    ctx.fillStyle = "#ffb36b"; ctx.font = "bold 9px monospace";
+    ctx.fillText("RANG : " + rank, VIEW_W / 2, VIEW_H - 40);
+    ctx.fillStyle = "#7fd4ff"; ctx.font = "7px monospace";
+    ctx.fillText("[ENTRÉE] Suite ▸", VIEW_W / 2, VIEW_H - 10);
+  } else {
+    // ===== les lignes narratives =====
+    ctx.fillStyle = "rgba(6,9,14,0.82)";
+    ctx.fillRect(0, VIEW_H - 76, VIEW_W, 76);
+    const line = ENDING_LINES[Game.endingIdx - 1] || "";
+    ctx.fillStyle = "#e8eef4"; ctx.font = "8px monospace"; ctx.textAlign = "center";
+    const lines = line.split("\n");
+    const lh = 11, totalH = lines.length * lh;
+    let yy = VIEW_H - 62 - (totalH - lh) / 2 + 6;
+    for (const l of lines) {
+      const words = l.split(" "); let l2 = "";
+      for (const w of words) {
+        const t = l2 + w + " ";
+        if (ctx.measureText(t).width > VIEW_W - 40 && l2) { ctx.fillText(l2, VIEW_W / 2, yy); l2 = w + " "; yy += lh; }
+        else l2 = t;
+      }
+      ctx.fillText(l2, VIEW_W / 2, yy); yy += lh;
+    }
+    ctx.fillStyle = "#7fd4ff"; ctx.font = "7px monospace";
+    ctx.fillText("ENTRÉE ▸", VIEW_W / 2, VIEW_H - 8);
   }
-  ctx.fillStyle = "#7fd4ff"; ctx.font = "7px monospace";
-  ctx.fillText("ENTRÉE ▸", VIEW_W / 2, VIEW_H - 8);
   ctx.textAlign = "left";
   ctx.restore();
 }
@@ -2717,9 +2824,10 @@ const Game = {
       case "ending":
         if (keyPressed("interact")) {
           this.endingIdx++;
-          if (this.endingIdx >= ENDING_LINES.length) {
+          if (this.endingIdx >= ENDING_LINES.length + 1) { // +1: l'écran de victoire compte comme idx 0
             this.setState("title");
             this.endingIdx = 0;
+            Game.confetti = null;
             wipeSave();
           }
         }
@@ -2748,7 +2856,8 @@ function startNewOrContinue(forceNew) {
 function startEnding() {
   Game.endingIdx = 0;
   Game.setState("ending");
-  AudioSys.sfx("jingle");
+  AudioSys.sfx("victory");   // FANFARE — la victoire se souligne
+  AudioSys.musicPlay(null);  // silence: la fanfare seule
   S.endingSeen = true;
   saveGame();
 }
